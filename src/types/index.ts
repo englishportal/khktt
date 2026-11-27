@@ -34,6 +34,87 @@ export interface ActionPlan {
   importantWarnings: string[];
 }
 
+export interface GroundingSource {
+  title: string;
+  url: string;
+  domain?: string;
+  sourceCategory?: string;
+  evidenceExcerpt?: string;
+}
+
+export interface DifferentialDiseaseItem {
+  diseaseId?: string;
+  diseaseName: string;
+  likelihood: 'most_likely' | 'possible_differential' | 'less_likely';
+  matchingSignsOnImage: string[];
+  distinguishingFeatures: string[];
+  referenceComparison: string;
+  whyRankedHere: string;
+}
+
+export interface ComparisonMatrixRow {
+  criterion: string;
+  observedOnPhoto: string;
+  diseaseDetails: {
+    diseaseName: string;
+    detail: string;
+  }[];
+}
+
+export interface ComparisonMatrix {
+  sharedSymptoms: string[];
+  rows: ComparisonMatrixRow[];
+}
+
+export interface EvidenceItem {
+  sourceTitle: string;
+  domain: string;
+  sourceCategory: string;
+  url: string;
+  evidenceExcerpt: string;
+}
+
+export interface IndependentVerification {
+  initialHypothesis: string;
+  finalConclusion: string;
+  verifierModelLabel: string;
+  independentModelUsed: boolean;
+  agreementStatus: 'confirmed' | 'partially_consistent' | 'conflicting' | 'insufficient';
+  consistentPoints: string[];
+  contradictionsOrUncertainties: string[];
+  limitations: string[];
+}
+
+export interface ReliabilityAssessment {
+  overallLevel: 'high' | 'medium' | 'low';
+  evidenceCompleteness: 'sufficient' | 'partial' | 'insufficient';
+  evidenceCompletenessNote: string;
+  sourceAgreement: 'high_consensus' | 'partial_consensus' | 'conflicting' | 'insufficient_sources';
+  sourceAgreementNote: string;
+  visualSimilarityNote: string;
+  summary: string;
+  lowConfidenceAction?: string;
+}
+
+export interface TreatmentGuide {
+  cause: string;
+  recognitionSigns: string[];
+  favorableConditions: string;
+  cultivationAndPrevention: string[];
+  professionalHandling: string[];
+  pesticideSafetyNote: string;
+  immediate24hSteps?: string[];
+  careNext3To7Days?: string[];
+  mildVsSevereGuide?: {
+    mildCase: string;
+    severeCase: string;
+  };
+  suggestedActiveIngredients?: string[];
+  doList?: string[];
+  dontList?: string[];
+  recoveryCheckSigns?: string[];
+}
+
 export interface DiagnosisResult {
   isPlantImage: boolean;
   cropDetected: string;
@@ -43,6 +124,13 @@ export interface DiagnosisResult {
   symptoms: string[];
   possibleDiagnoses: PossibleDiagnosis[];
   alternativeCauses: string[];
+  differentialExplanation?: string;
+  differentialDiseases?: DifferentialDiseaseItem[];
+  comparisonMatrix?: ComparisonMatrix;
+  evidenceItems?: EvidenceItem[];
+  verification?: IndependentVerification;
+  reliability?: ReliabilityAssessment;
+  treatmentGuide?: TreatmentGuide;
   severityAssessment: SeverityAssessment;
   needsMoreImages: boolean;
   additionalImageInstructions: string[];
@@ -50,6 +138,10 @@ export interface DiagnosisResult {
   actionPlan?: ActionPlan;
   expertVerificationRecommended: boolean;
   disclaimer: string;
+  groundingSources?: GroundingSource[];
+  searchQueries?: string[];
+  googleSearchStatus?: 'verified' | 'quota_exceeded' | 'unavailable';
+  googleSearchNotice?: string;
 }
 
 export interface GalleryImage {
@@ -97,6 +189,8 @@ export interface DiagnosisHistoryItem {
   imageUrl: string;
   assessment: DiagnosisResult;
   suspectedDiseases: string[];
+  differentialDiseases?: string[];
+  referenceSources?: GroundingSource[];
   imageQuality: ImageQuality;
   verificationStatus: DiagnosisVerificationStatus;
   expertNotes?: string;

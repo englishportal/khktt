@@ -6,9 +6,10 @@ import {
   History,
   Sun,
 } from 'lucide-react';
-import { fetchUserDiagnoses } from '../../services/diagnosisService';
+import { fetchScanTrustStats, ScanTrustSummary } from '../../services/diagnosisService';
 import { CropType } from '../../types';
 import { useAuth } from '../../context/AuthContext';
+import { SuccessfulScansBanner } from './SuccessfulScansBanner';
 
 interface HomeDashboardProps {
   onStartScan: (crop?: CropType) => void;
@@ -16,24 +17,29 @@ interface HomeDashboardProps {
 }
 
 export const HomeDashboard: React.FC<HomeDashboardProps> = ({ onStartScan, onNavigate }) => {
-  const { user } = useAuth();
-  const [diagnosisCount, setDiagnosisCount] = useState<number>(0);
+  const { user, isResearcher } = useAuth();
+  const [scanStats, setScanStats] = useState<ScanTrustSummary | null>(null);
+  const [statsLoading, setStatsLoading] = useState<boolean>(true);
 
   useEffect(() => {
     let active = true;
-    async function loadCount() {
+    async function loadStats() {
       try {
-        const diags = await fetchUserDiagnoses(user?.uid);
-        if (active) setDiagnosisCount(diags.length);
+        const stats = await fetchScanTrustStats(user?.uid, isResearcher);
+        if (active) setScanStats(stats);
       } catch (err) {
-        console.error('Error loading diagnosis count:', err);
+        console.error('Error loading diagnosis stats:', err);
+      } finally {
+        if (active) setStatsLoading(false);
       }
     }
-    loadCount();
+    loadStats();
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [user, isResearcher]);
+
+  const diagnosisCount = scanStats?.userSuccessfulScans ?? 0;
 
   const crops: {
     id: CropType;
@@ -76,6 +82,14 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({ onStartScan, onNav
           Chọn loại cây bên dưới rồi chụp ảnh lá hoặc quả bị bệnh để xem ngay.
         </p>
       </section>
+
+      {/* Farmer Trust Counter: Real Successful Disease Scans */}
+      <SuccessfulScansBanner
+        stats={scanStats}
+        loading={statsLoading}
+        onStartScan={() => onStartScan('citrus')}
+        onViewHistory={() => onNavigate('history')}
+      />
 
       {/* 3 Large Crop Cards */}
       <section className="grid grid-cols-1 md:grid-cols-3 gap-5">

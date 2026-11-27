@@ -5,19 +5,16 @@ import {
   RefreshCw,
   AlertTriangle,
   CheckCircle,
-  MessageCircle,
-  BookOpen,
   ShieldAlert,
   HelpCircle,
-  Volume2,
-  Square,
   Plus,
   X,
 } from 'lucide-react';
-import { CropType, PlantPart, DiagnosisResult, ConfidenceLevel, FieldQuizAnswers } from '../../types';
+import { CropType, PlantPart, DiagnosisResult, FieldQuizAnswers } from '../../types';
 import { runServerDiagnosis, saveDiagnosisRecord, fetchDiagnosisAudio } from '../../services/diagnosisService';
 import { useAuth } from '../../context/AuthContext';
-import { DEFAULT_DISEASES } from '../../data/defaultDiseases';
+import { resolveSupportedCropType } from '../../utils/vietnameseText';
+import { DiagnosisReportView } from './DiagnosisReportView';
 
 interface PlantScannerProps {
   initialCrop?: CropType;
@@ -278,7 +275,11 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
       return 'Ảnh này chưa thấy rõ lá hoặc thân cây trồng. Bác vui lòng chụp lại cận cảnh phần lá hoặc thân cây bị bệnh nhé.';
     }
     if (!res.selectedCropMatches) {
-      return `Nhầm loại cây rồi bác ơi. Bác đang chọn ${getCropLabel(selectedCrop)}, nhưng ảnh này giống ${res.cropDetected}. Bác bấm nút chuyển sang đúng loại cây để xem kết quả nhé.`;
+      const supportedTarget = resolveSupportedCropType(res.cropDetected);
+      if (supportedTarget && supportedTarget !== selectedCrop) {
+        return `Nhầm loại cây rồi bác ơi. Bác đang chọn ${getCropLabel(selectedCrop)}, nhưng ảnh này giống ${getCropLabel(supportedTarget)}. Bác bấm nút chuyển sang đúng loại cây để xem kết quả nhé.`;
+      }
+      return `Loại cây này chưa được hỗ trợ khám bác ơi. Bác đang chọn ${getCropLabel(selectedCrop)}, nhưng ảnh này trông giống ${res.cropDetected}. Hiện hệ thống chỉ hỗ trợ khám Cây Cam Bưởi, Cây Lúa và Cây Lạc thôi ạ.`;
     }
     if (primaryDiag?.diseaseId === 'unclear_due_to_blur' || (res.imageQuality === 'poor' && primaryDiag?.confidenceLevel === 'insufficient_evidence')) {
       return 'Ảnh bị mờ nên máy chưa nhìn rõ bệnh. Bác đưa điện thoại cách lá khoảng 20 xăng ti mét, chạm tay lấy nét vào vết bệnh rồi chụp lại nơi đủ sáng nhé.';
@@ -290,16 +291,29 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
 
     const diseaseName = primaryDiag?.diseaseName || 'Chưa xác định rõ bệnh';
     const symptomsText = (primaryDiag?.evidence?.length ? primaryDiag.evidence : res.symptoms).slice(0, 2).join('. ');
-    const immediate = res.actionPlan?.immediateSteps?.length
-      ? `Việc cần làm ngay hôm nay: ${res.actionPlan.immediateSteps.join('. ')}.`
+    const immediateSteps =
+      res.treatmentGuide?.immediate24hSteps?.length
+        ? res.treatmentGuide.immediate24hSteps
+        : res.actionPlan?.immediateSteps || [];
+    const careSteps =
+      res.treatmentGuide?.careNext3To7Days?.length
+        ? res.treatmentGuide.careNext3To7Days
+        : res.actionPlan?.safeCareAndPrevention || [];
+    const warnings =
+      res.treatmentGuide?.dontList?.length
+        ? res.treatmentGuide.dontList
+        : res.actionPlan?.importantWarnings || [];
+
+    const immediate = immediateSteps.length
+      ? `Việc cần làm ngay trong 24 giờ đầu: ${immediateSteps.slice(0, 3).join('. ')}.`
       : '';
-    const care = res.actionPlan?.safeCareAndPrevention?.length
-      ? `Cách chăm sóc và phòng trị an toàn: ${res.actionPlan.safeCareAndPrevention.join('. ')}.`
+    const care = careSteps.length
+      ? `Chăm sóc trong 3 đến 7 ngày tới: ${careSteps.slice(0, 2).join('. ')}.`
       : res.recommendations.length
-      ? `Cách xử lý bác nên làm: ${res.recommendations.join('. ')}.`
+      ? `Cách xử lý bác nên làm: ${res.recommendations.slice(0, 3).join('. ')}.`
       : '';
-    const warn = res.actionPlan?.importantWarnings?.length
-      ? `Lưu ý quan trọng: ${res.actionPlan.importantWarnings.join('. ')}.`
+    const warn = warnings.length
+      ? `Lưu ý cần tránh: ${warnings.slice(0, 2).join('. ')}.`
       : '';
 
     return `Kết quả kiểm tra ${getCropLabel(selectedCrop)}: Nghi ngờ ${diseaseName}. Dấu hiệu trên ảnh: ${symptomsText}. ${immediate} ${care} ${warn}`.trim();
@@ -592,9 +606,15 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
     setRefImgError(false);
     stopSpeaking();
 
-    setScanStepMessage('Đang kiểm tra độ rõ các góc ảnh...');
-    const step1 = setTimeout(() => setScanStepMessage('Đang đối chiếu hình ảnh và câu trả lời thực địa...'), 900);
-    const step2 = setTimeout(() => setScanStepMessage('Đang soạn hướng dẫn xử lý từng bước cho bác...'), 2200);
+    setScanStepMessage('Bước 1/3: Đang phân tích dấu hiệu trên ảnh và lập giả thuyết ban đầu...');
+    const step1 = setTimeout(
+      () => setScanStepMessage('Bước 2/3: Đang truy xuất tài liệu nông nghiệp từ nhiều nguồn trực tuyến...'),
+      2000
+    );
+    const step2 = setTimeout(
+      () => setScanStepMessage('Bước 3/3: Đang kiểm chứng độc lập kết quả và đánh giá độ tin cậy...'),
+      7500
+    );
 
     try {
       const visualMetrics = await extractVisualMetrics(imagePreview, imageFileName, sourceSampleCrop);
@@ -629,11 +649,17 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
         imageUrl: imagePreview,
         assessment: diagnosisResult,
         suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
+        differentialDiseases: diagnosisResult.differentialDiseases
+          ? diagnosisResult.differentialDiseases.map((d) => d.diseaseName)
+          : diagnosisResult.alternativeCauses,
+        referenceSources: diagnosisResult.groundingSources || [],
         imageQuality: diagnosisResult.imageQuality,
         verificationStatus: 'unverified',
       });
       setIsSaved(true);
     } catch (err: any) {
+      clearTimeout(step1);
+      clearTimeout(step2);
       console.error('Diagnosis failed:', err);
       setAnalysisError(err.message || 'Chưa kiểm tra được ảnh này. Bác vui lòng chụp lại ảnh rõ hơn nhé.');
     } finally {
@@ -681,6 +707,10 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
         imageUrl: imagePreview,
         assessment: diagnosisResult,
         suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
+        differentialDiseases: diagnosisResult.differentialDiseases
+          ? diagnosisResult.differentialDiseases.map((d) => d.diseaseName)
+          : diagnosisResult.alternativeCauses,
+        referenceSources: diagnosisResult.groundingSources || [],
         imageQuality: diagnosisResult.imageQuality,
         verificationStatus: 'unverified',
       });
@@ -709,19 +739,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const getConfidenceText = (level: ConfidenceLevel) => {
-    switch (level) {
-      case 'high':
-        return { label: 'Khả năng cao', style: 'bg-emerald-100 text-emerald-900 border-emerald-300' };
-      case 'medium':
-        return { label: 'Khả năng trung bình', style: 'bg-amber-100 text-amber-900 border-amber-300' };
-      case 'low':
-        return { label: 'Ít khả năng', style: 'bg-stone-100 text-stone-800 border-stone-300' };
-      default:
-        return { label: 'Cần xem thêm', style: 'bg-stone-100 text-stone-800 border-stone-300' };
-    }
-  };
-
   const quickSamples = [
     {
       crop: 'citrus' as CropType,
@@ -747,7 +764,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
   ];
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6 pb-8">
+    <div className="max-w-5xl mx-auto space-y-6 pb-8">
       {/* Simple Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
@@ -1232,58 +1249,87 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
                 <span>Chụp lại ảnh lá cây</span>
               </button>
             </div>
-          ) : !result.selectedCropMatches ? (
-            <div className="bg-amber-50 rounded-2xl border-2 border-amber-300 p-6 space-y-4">
-              <div className="flex items-start gap-3">
-                <ShieldAlert className="w-7 h-7 text-amber-700 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <h2 className="text-xl sm:text-2xl font-bold text-amber-950">
-                    Nhầm loại cây rồi bác ơi!
-                  </h2>
-                  <p className="text-base text-stone-800 leading-relaxed">
-                    Bác đang chọn khám <strong>{getCropLabel(selectedCrop)}</strong>, nhưng ảnh này trông giống{' '}
-                    <strong>{result.cropDetected}</strong>. Máy tạm dừng để tránh báo nhầm bệnh cho bác.
-                  </p>
+          ) : !result.selectedCropMatches ? (() => {
+            const detectedSupportedCrop = resolveSupportedCropType(result.cropDetected);
+            const canSwitchToSupportedCrop =
+              detectedSupportedCrop !== null && detectedSupportedCrop !== selectedCrop;
+            const detectedDisplayLabel = canSwitchToSupportedCrop
+              ? getCropLabel(detectedSupportedCrop)
+              : result.cropDetected &&
+                result.cropDetected.trim().toLowerCase() !== getCropLabel(selectedCrop).toLowerCase()
+              ? result.cropDetected
+              : 'một loại cây trồng khác';
+
+            return (
+              <div className="bg-amber-50 rounded-2xl border-2 border-amber-300 p-6 space-y-4">
+                <div className="flex items-start gap-3">
+                  <ShieldAlert className="w-7 h-7 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1.5">
+                    <h2 className="text-xl sm:text-2xl font-bold text-amber-950">
+                      {canSwitchToSupportedCrop
+                        ? 'Nhầm loại cây rồi bác ơi!'
+                        : 'Loại cây này chưa được hỗ trợ khám!'}
+                    </h2>
+                    {canSwitchToSupportedCrop ? (
+                      <p className="text-base text-stone-800 leading-relaxed">
+                        Bác đang chọn khám <strong>{getCropLabel(selectedCrop)}</strong>, nhưng ảnh này trông giống{' '}
+                        <strong>{detectedDisplayLabel}</strong>. Máy tạm dừng để tránh báo nhầm bệnh cho bác.
+                      </p>
+                    ) : (
+                      <p className="text-base text-stone-800 leading-relaxed">
+                        Bác đang chọn khám <strong>{getCropLabel(selectedCrop)}</strong>, nhưng ảnh này là{' '}
+                        <strong>{detectedDisplayLabel}</strong>. Hiện tại hệ thống chỉ hỗ trợ khám chính xác 3 loại cây:{' '}
+                        <strong>Cây Cam, Bưởi</strong>, <strong>Cây Lúa</strong> và <strong>Cây Lạc</strong>, nên máy tạm dừng để tránh chẩn đoán sai cho bác.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                  {canSwitchToSupportedCrop ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleSwitchCropAndDiagnose(detectedSupportedCrop)}
+                        className="flex-1 min-h-[54px] px-5 py-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-base font-bold flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <RefreshCw className="w-5 h-5" />
+                        <span>Chuyển sang khám đúng {detectedDisplayLabel} ngay</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="min-h-[54px] px-5 py-3 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-base font-semibold cursor-pointer"
+                      >
+                        Chọn lại ảnh khác
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex-1 min-h-[54px] px-5 py-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-base font-bold flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <Upload className="w-5 h-5" />
+                        <span>Chọn lại ảnh Cam, Bưởi / Lúa / Lạc</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={startCamera}
+                        className="min-h-[54px] px-5 py-3 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-base font-semibold flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <Camera className="w-5 h-5 text-emerald-700" />
+                        <span>Chụp ảnh khác</span>
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
-
-              <div className="flex flex-col sm:flex-row gap-3 pt-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const detectedLower = result.cropDetected.toLowerCase();
-                    const targetCrop: CropType =
-                      detectedLower.includes('lạc') || detectedLower.includes('đậu') || detectedLower.includes('peanut')
-                        ? 'peanut'
-                        : detectedLower.includes('cam') || detectedLower.includes('bưởi') || detectedLower.includes('citrus')
-                        ? 'citrus'
-                        : 'rice';
-                    handleSwitchCropAndDiagnose(targetCrop);
-                  }}
-                  className="flex-1 min-h-[54px] px-5 py-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-base font-bold flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <RefreshCw className="w-5 h-5" />
-                  <span>
-                    Chuyển sang khám đúng{' '}
-                    {result.cropDetected.toLowerCase().includes('lạc') || result.cropDetected.toLowerCase().includes('đậu')
-                      ? 'Cây Lạc'
-                      : result.cropDetected.toLowerCase().includes('cam')
-                      ? 'Cây Cam, Bưởi'
-                      : 'Cây Lúa'}{' '}
-                    ngay
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="min-h-[54px] px-5 py-3 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 text-base font-semibold cursor-pointer"
-                >
-                  Chọn lại ảnh khác
-                </button>
-              </div>
-            </div>
-          ) : (() => {
+            );
+          })() : (() => {
             const primaryDiag = result.possibleDiagnoses[0];
             const isHealthy = primaryDiag?.diseaseId === 'healthy';
             const isBlurryResult =
@@ -1364,244 +1410,28 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
               );
             }
 
-            /* Case 4: Disease Found */
-            const badge = getConfidenceText(primaryDiag?.confidenceLevel || 'medium');
-            const matchedRef = DEFAULT_DISEASES.find(
-              (d) =>
-                d.id === primaryDiag?.diseaseId ||
-                (primaryDiag?.diseaseName &&
-                  (d.vietnameseName.toLowerCase().includes(primaryDiag.diseaseName.toLowerCase()) ||
-                    primaryDiag.diseaseName.toLowerCase().includes(d.vietnameseName.toLowerCase())))
+            /* Case 4: Disease Found — Full Structured A-I Verification Report */
+            const activeExtraPreviews = extraImages.filter(
+              (x): x is { imageBase64: string; angleLabel: string } => Boolean(x && x.imageBase64)
             );
 
             return (
-              <div className="bg-white rounded-2xl border-2 border-emerald-200 p-5 sm:p-7 space-y-6">
-                {/* Main Diagnosis Headline + Voice Read-Aloud Button */}
-                <div className="space-y-3 border-b border-stone-200 pb-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-sm font-semibold text-stone-600">
-                      {getCropLabel(selectedCrop)} • {getPartLabel(selectedPart)}
-                    </span>
-                    <span className={`px-3 py-1 rounded-lg border text-sm font-bold ${badge.style}`}>
-                      {badge.label}
-                    </span>
-                  </div>
-                  <h2 className="text-2xl sm:text-3xl font-bold text-stone-900 leading-tight">
-                    {primaryDiag?.diseaseName || 'Chưa xác định rõ bệnh'}
-                  </h2>
-
-                  <div className="pt-1 flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => handleToggleSpeak(result)}
-                      className={`min-h-[48px] px-5 py-2.5 rounded-xl font-bold text-base flex items-center gap-2.5 transition-colors cursor-pointer ${
-                        isSpeaking
-                          ? 'bg-amber-700 hover:bg-amber-800 text-white'
-                          : 'bg-emerald-800 hover:bg-emerald-900 text-white'
-                      }`}
-                    >
-                      {isTtsLoading ? (
-                        <>
-                          <RefreshCw className="w-5 h-5 animate-spin shrink-0" />
-                          <span>Đang tạo giọng đọc...</span>
-                        </>
-                      ) : isSpeaking ? (
-                        <>
-                          <Square className="w-4 h-4 fill-current shrink-0" />
-                          <span>Dừng nghe đọc</span>
-                        </>
-                      ) : (
-                        <>
-                          <Volume2 className="w-5 h-5 shrink-0" />
-                          <span>Nghe đọc kết quả & cách chữa</span>
-                        </>
-                      )}
-                    </button>
-                    {ttsError && <span className="text-sm text-amber-800">{ttsError}</span>}
-                  </div>
-                </div>
-
-                {/* Observed Symptoms */}
-                {(result.symptoms.length > 0 || (primaryDiag?.evidence && primaryDiag.evidence.length > 0)) && (
-                  <div className="space-y-2">
-                    <h3 className="text-lg font-bold text-stone-900">
-                      Dấu hiệu nhìn thấy trên ảnh
-                    </h3>
-                    <ul className="list-disc list-inside space-y-1.5 text-base text-stone-800 bg-stone-50 p-4 rounded-xl border border-stone-200">
-                      {(primaryDiag?.evidence?.length ? primaryDiag.evidence : result.symptoms).map((item, idx) => (
-                        <li key={idx}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {/* Clear Step-by-Step Actionable Treatment Guide */}
-                {result.actionPlan ? (
-                  <div className="space-y-4">
-                    {result.actionPlan.immediateSteps.length > 0 && (
-                      <div className="bg-emerald-50 rounded-2xl border-2 border-emerald-200 p-4 sm:p-5 space-y-2.5">
-                        <h3 className="text-lg font-bold text-emerald-950">
-                          Bước 1: Việc bác cần làm ngay hôm nay
-                        </h3>
-                        <ol className="list-decimal list-inside space-y-2 text-base text-stone-900 leading-relaxed">
-                          {result.actionPlan.immediateSteps.map((step, idx) => (
-                            <li key={idx}>{step}</li>
-                          ))}
-                        </ol>
-                      </div>
-                    )}
-
-                    {result.actionPlan.safeCareAndPrevention.length > 0 && (
-                      <div className="bg-white rounded-2xl border border-stone-200 p-4 sm:p-5 space-y-2.5">
-                        <h3 className="text-lg font-bold text-stone-900">
-                          Bước 2: Cách chăm sóc & phòng trị an toàn
-                        </h3>
-                        <ol className="list-decimal list-inside space-y-2 text-base text-stone-800 leading-relaxed">
-                          {result.actionPlan.safeCareAndPrevention.map((step, idx) => (
-                            <li key={idx}>{step}</li>
-                          ))}
-                        </ol>
-                      </div>
-                    )}
-
-                    {result.actionPlan.importantWarnings.length > 0 && (
-                      <div className="bg-amber-50 rounded-2xl border border-amber-200 p-4 sm:p-5 space-y-2">
-                        <h3 className="text-base sm:text-lg font-bold text-amber-950">
-                          Bước 3: Lưu ý tránh làm sai & khi nào gọi kỹ thuật
-                        </h3>
-                        <ul className="list-disc list-inside space-y-1.5 text-base text-stone-800 leading-relaxed">
-                          {result.actionPlan.importantWarnings.map((warn, idx) => (
-                            <li key={idx}>{warn}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  result.recommendations.length > 0 && (
-                    <div className="bg-emerald-50 rounded-2xl border border-emerald-200 p-4 sm:p-5 space-y-3">
-                      <h3 className="text-lg font-bold text-emerald-950">
-                        Bác nên làm gì ngay
-                      </h3>
-                      <ol className="list-decimal list-inside space-y-2 text-base text-stone-900 leading-relaxed">
-                        {result.recommendations.map((rec, idx) => (
-                          <li key={idx}>{rec}</li>
-                        ))}
-                      </ol>
-                    </div>
-                  )
-                )}
-
-                {/* Simple Side-by-side Visual Comparison (Light Clean Theme) */}
-                {matchedRef && matchedRef.sampleImageUrl && (
-                  <div className="space-y-3 pt-1">
-                    <h3 className="text-lg font-bold text-stone-900">
-                      So sánh ảnh bác chụp với ảnh mẫu bệnh
-                    </h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div className="rounded-xl border border-stone-200 p-3 bg-stone-50 space-y-2">
-                        <p className="text-sm font-bold text-stone-800">1. Ảnh bác chụp</p>
-                        <div className="rounded-lg overflow-hidden aspect-4/3 bg-white border border-stone-200">
-                          <img
-                            src={imagePreview || ''}
-                            alt="Ảnh bác chụp"
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-stone-200 p-3 bg-stone-50 space-y-2">
-                        <p className="text-sm font-bold text-stone-800">
-                          2. Ảnh mẫu: {matchedRef.vietnameseName}
-                        </p>
-                        <div className="rounded-lg overflow-hidden aspect-4/3 bg-white border border-stone-200 flex items-center justify-center">
-                          {matchedRef.sampleImageUrl && !refImgError ? (
-                            <img
-                              src={matchedRef.sampleImageUrl}
-                              alt={matchedRef.vietnameseName}
-                              referrerPolicy="no-referrer"
-                              onError={() => setRefImgError(true)}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <span className="text-sm text-stone-500 p-4 text-center">
-                              Chưa có ảnh mẫu đối chiếu
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Technical details tucked safely away */}
-                {(result.alternativeCauses.length > 0 || result.disclaimer) && (
-                  <details className="rounded-xl border border-stone-200 bg-stone-50 p-4 text-sm text-stone-700">
-                    <summary className="font-semibold text-stone-800 cursor-pointer">
-                      Xem ghi chú dành cho cán bộ kỹ thuật
-                    </summary>
-                    <div className="mt-3 space-y-2 leading-relaxed">
-                      {result.alternativeCauses.length > 0 && (
-                        <p>
-                          <strong>Nguyên nhân khác có thể nhầm lẫn:</strong> {result.alternativeCauses.join('; ')}.
-                        </p>
-                      )}
-                      {result.disclaimer && (
-                        <p>
-                          <strong>Lưu ý chuyên môn:</strong> {result.disclaimer}
-                        </p>
-                      )}
-                    </div>
-                  </details>
-                )}
-
-                {/* Bottom Actions */}
-                <div className="pt-3 border-t border-stone-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onNavigateToAssistant({
-                          crop: result.cropDetected,
-                          part: getPartLabel(selectedPart),
-                          suspectedDisease: primaryDiag?.diseaseName,
-                          symptoms: result.symptoms,
-                          confidenceLevel: badge.label,
-                        })
-                      }
-                      className="min-h-[48px] px-5 py-2.5 rounded-xl font-bold text-base bg-emerald-700 hover:bg-emerald-800 text-white flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <MessageCircle className="w-5 h-5" />
-                      <span>Hỏi thêm cách chữa</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={resetScanner}
-                      className="min-h-[48px] px-5 py-2.5 rounded-xl font-bold text-base bg-white hover:bg-stone-50 text-stone-800 border-2 border-stone-300 cursor-pointer"
-                    >
-                      Chụp khám cây khác
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between sm:justify-end gap-3">
-                    <button
-                      type="button"
-                      onClick={() => onNavigateToLibrary(selectedCrop)}
-                      className="text-sm font-semibold text-emerald-800 hover:underline flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <BookOpen className="w-4 h-4" />
-                      <span>Mở sổ bệnh</span>
-                    </button>
-                    {isSaved && (
-                      <span className="text-sm font-semibold text-emerald-700">
-                        ✓ Đã lưu
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
+              <DiagnosisReportView
+                result={result}
+                selectedCrop={selectedCrop}
+                selectedPart={selectedPart}
+                imagePreview={imagePreview}
+                extraImages={activeExtraPreviews}
+                isSaved={isSaved}
+                isTtsLoading={isTtsLoading}
+                isSpeaking={isSpeaking}
+                ttsError={ttsError}
+                onToggleSpeak={handleToggleSpeak}
+                onRetakePhoto={startCamera}
+                onResetScanner={resetScanner}
+                onNavigateToAssistant={onNavigateToAssistant}
+                onNavigateToLibrary={onNavigateToLibrary}
+              />
             );
           })()}
         </section>

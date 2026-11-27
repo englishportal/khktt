@@ -1,6 +1,7 @@
 import type { DiseaseRecord } from '../types/index.js';
+import { EXTENDED_DISEASES } from './extendedDiseases.js';
 
-export const DEFAULT_DISEASES: DiseaseRecord[] = [
+const CORE_DISEASES: DiseaseRecord[] = [
   // ==========================================
   // 1. CÂY CAM, QUÝT, BƯỞI (10 BỆNH / DỊCH HẠI)
   // ==========================================
@@ -1847,3 +1848,5 @@ export const DEFAULT_DISEASES: DiseaseRecord[] = [
     updatedAt: '2026-03-10T00:00:00.000Z'
   }
 ];
+
+export const DEFAULT_DISEASES: DiseaseRecord[] = [...CORE_DISEASES, ...EXTENDED_DISEASES];

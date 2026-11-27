@@ -11,13 +11,19 @@ import {
   ChevronRight,
   Images,
   CheckCircle2,
-  ShieldAlert,
   Wrench,
   BookOpen,
+  Clock,
+  CalendarDays,
+  Eye,
+  Ban,
+  AlertTriangle,
+  ExternalLink,
 } from 'lucide-react';
 import { DiseaseRecord, CropType, GalleryImage } from '../../types';
 import { fetchDiseases, saveDisease, deleteDisease, syncVerifiedDiseases } from '../../services/diseaseService';
 import { useAuth } from '../../context/AuthContext';
+import { cleanVietnameseText } from '../../utils/vietnameseText';
 
 interface KnowledgeLibraryProps {
   initialCrop?: CropType;
@@ -41,6 +47,194 @@ function getDiseaseImages(disease: DiseaseRecord): GalleryImage[] {
     });
   }
   return list;
+}
+
+function buildGoogleImageSearchUrl(disease: DiseaseRecord): string {
+  const cleanName = cleanVietnameseText(disease.vietnameseName);
+  const cropWord =
+    disease.cropType === 'citrus'
+      ? 'cây cam bưởi'
+      : disease.cropType === 'rice'
+      ? 'cây lúa'
+      : 'cây lạc đậu phộng';
+  const query = `${cleanName} ${cropWord} hình ảnh thực tế`;
+  return `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
+}
+
+function splitToActionBullets(raw?: string): string[] {
+  if (!raw) return [];
+  const cleaned = cleanVietnameseText(raw);
+  return cleaned
+    .split(/(?:\.\s+|;\s+)/)
+    .map((s) => s.trim().replace(/\.$/, ''))
+    .filter((s) => s.length >= 8);
+}
+
+function buildPracticalLibraryGuide(disease: DiseaseRecord) {
+  const textBag = `${disease.id} ${disease.vietnameseName} ${disease.causes}`.toLowerCase();
+  const isIncurableSystemic =
+    textBag.includes('greening') ||
+    textBag.includes('vàng lá gân xanh') ||
+    textBag.includes('tristeza') ||
+    textBag.includes('tàn lụi vi-rút') ||
+    textBag.includes('vi-rút') ||
+    textBag.includes('virus') ||
+    textBag.includes('lùn xoắn lá') ||
+    textBag.includes('vàng lùn') ||
+    textBag.includes('tungro') ||
+    textBag.includes('khảm');
+
+  const isNutrientOrPhysiological =
+    textBag.includes('deficiency') ||
+    textBag.includes('thiếu ') ||
+    textBag.includes('ngộ độc') ||
+    textBag.includes('toxicity') ||
+    textBag.includes('stress') ||
+    textBag.includes('cháy nắng') ||
+    textBag.includes('nứt quả') ||
+    textBag.includes('rụng sinh lý');
+
+  const isPest =
+    textBag.includes('bọ trĩ') ||
+    textBag.includes('nhện') ||
+    textBag.includes('rầy') ||
+    textBag.includes('rệp') ||
+    textBag.includes('sâu ') ||
+    textBag.includes('ruồi') ||
+    textBag.includes('bọ xít') ||
+    textBag.includes('ốc ') ||
+    textBag.includes('tuyến trùng') ||
+    textBag.includes('mối') ||
+    textBag.includes('chuột') ||
+    textBag.includes('thrips') ||
+    textBag.includes('mite') ||
+    textBag.includes('psyllid') ||
+    textBag.includes('borer') ||
+    textBag.includes('planthopper');
+
+  const isBacterial =
+    !isIncurableSystemic &&
+    (textBag.includes('vi khuẩn') || textBag.includes('loét') || textBag.includes('bạc lá') || textBag.includes('héo xanh'));
+
+  const cropUnit = disease.cropType === 'citrus' ? 'cây / cành' : disease.cropType === 'rice' ? 'khóm / chòm ruộng' : 'bụi / luống lạc';
+
+  const managementBullets = splitToActionBullets(disease.safeManagement);
+  const preventionBullets = splitToActionBullets(disease.preventionMethods);
+
+  const immediate24h =
+    disease.treatmentSteps?.immediate && disease.treatmentSteps.immediate.length > 0
+      ? disease.treatmentSteps.immediate.map(cleanVietnameseText)
+      : isIncurableSystemic
+      ? [
+          `Đánh dấu ngay những ${cropUnit} có dấu hiệu bệnh, không lấy mắt ghép, cành chiết hoặc hạt giống từ những cây này.`,
+          'Kiểm tra kỹ đọt non và mặt dưới lá để phát hiện côn trùng môi giới (như rầy chổng cánh, rầy nâu, rệp muội) và khoanh vùng xử lý sớm.',
+          ...managementBullets.slice(0, 1),
+        ]
+      : isNutrientOrPhysiological
+      ? [
+          'Kiểm tra độ ẩm đất, khả năng thoát nước quanh gốc và độ chua của đất trước khi bón bổ sung phân.',
+          ...managementBullets.slice(0, 2),
+        ]
+      : isPest
+      ? [
+          'Đi thăm vườn/ruộng vào sáng sớm hoặc chiều mát, lật mặt dưới lá non và chùm đọt để ước lượng mật độ sâu hại.',
+          ...managementBullets.slice(0, 2),
+        ]
+      : [
+          disease.cropType === 'citrus'
+            ? 'Cắt tỉa cành lá bị bệnh nặng, gom vào bao mang ra khỏi vườn tiêu hủy; lau khử lưỡi kéo bằng cồn hoặc nước vôi trước khi cắt cây khác.'
+            : 'Khoanh vùng chòm bị bệnh, tạm ngừng bón phân đạm và không tưới phun nước mạnh làm bắn bào tử bệnh sang cây khỏe.',
+          ...managementBullets.slice(0, 2),
+        ];
+
+  const care3To7Days =
+    disease.treatmentSteps?.biologicalAndCare && disease.treatmentSteps.biologicalAndCare.length > 0
+      ? disease.treatmentSteps.biologicalAndCare.map(cleanVietnameseText)
+      : managementBullets.length > 2
+      ? managementBullets.slice(2)
+      : managementBullets.length > 0
+      ? managementBullets
+      : [
+          'Kết hợp bón phân hữu cơ hoai mục, chế phẩm nấm đối kháng và phân cân đối để cây phục hồi sức đề kháng.',
+        ];
+
+  const mildCase = isIncurableSystemic
+    ? `Khi mới thấy vài cành hoặc vài ${cropUnit} chớm biểu hiện: khoanh vùng theo dõi sát, diệt sạch côn trùng truyền bệnh quanh vùng đó và hỏi cán bộ bảo vệ thực vật kiểm tra mẫu sớm.`
+    : isNutrientOrPhysiological
+    ? 'Khi mới chớm nhẹ trên ít lá: điều chỉnh lại nước tưới và bổ sung phân vi lượng/hữu cơ phù hợp qua gốc hoặc phun qua lá vào chiều mát.'
+    : isPest
+    ? 'Khi mật độ còn thấp, mới thấy rải rác: ưu tiên cắt bỏ đọt bị hại nặng, rửa vườn hoặc dùng dầu khoáng nông nghiệp / chế phẩm sinh học vào chiều mát.'
+    : `Khi mới chớm vài vết bệnh trên ít ${cropUnit}: cắt gom lá bệnh sớm, giữ vườn/ruộng thông thoáng, ngừng bón đạm và theo dõi sát 2–3 ngày trước khi quyết định phun xử lý.`;
+
+  const severeCase = isIncurableSystemic
+    ? 'Khi cây đã vàng nặng, còi cọc, quả méo hoặc lá xoăn lùn toàn thân: bệnh này KHÔNG có thuốc hóa học chữa khỏi. Bác nên nhổ/chặt bỏ tiêu hủy sớm để đỡ tốn tiền thuốc vô ích và tránh lây sang cả vườn/ruộng.'
+    : isNutrientOrPhysiological
+    ? 'Khi bị diện rộng nhiều cây: cần kiểm tra lại pH đất, tình trạng nghẹt rễ hoặc bón phân mất cân đối; bổ sung vôi nông nghiệp và hữu cơ hoai mục từng đợt, tránh bón dồn một lần gây sốc rễ.'
+    : isPest
+    ? 'Khi sâu/nhện bùng phát dày trên diện rộng: mang mẫu lá hoặc ảnh chụp ra đại lý vật tư uy tín hoặc trạm bảo vệ thực vật hỏi chọn đúng nhóm hoạt chất được phép lưu hành, phun ướt kỹ cả mặt dưới lá vào chiều mát.'
+    : 'Khi bệnh đã lan rộng sang nhiều cây/chòm ruộng: xử lý khoanh vùng từ ngoài vào trong, hỏi đại lý vật tư hoặc cán bộ khuyến nông chọn đúng nhóm thuốc trừ nấm/vi khuẩn được phép lưu hành cho đúng loại cây, phun nhắc lại theo đúng hướng dẫn trên nhãn.';
+
+  const doList = isIncurableSystemic
+    ? [
+        'Khử trùng dao, kéo cắt tỉa sau mỗi cây bằng cồn hoặc nước vôi.',
+        'Quản lý tốt côn trùng chích hút truyền bệnh ngay từ đợt lộc/đẻ nhánh mới.',
+        'Chọn cây giống sạch bệnh có nguồn gốc rõ ràng khi trồng dặm hoặc trồng mới.',
+      ]
+    : isPest
+    ? [
+        'Phun vào sáng sớm hoặc chiều mát khi sâu/nhện hoạt động mạnh và ít bay hơi thuốc.',
+        'Phun ướt đều cả hai mặt lá, đặc biệt là mặt dưới lá và ngọn non.',
+        'Luân phiên nhóm hoạt chất sinh học và hóa học theo tư vấn chuyên môn để tránh nhờn thuốc.',
+      ]
+    : [
+        'Thăm đồng/vườn đều đặn 2–3 ngày một lần, nhất là sau các đợt mưa ẩm hoặc sương muối.',
+        'Giữ tán thông thoáng, thoát nước tốt, bón cân đối đạm – lân – ka-li.',
+        'Ghi nhớ nguyên tắc 4 đúng nếu phải dùng thuốc bảo vệ thực vật.',
+      ];
+
+  const dontList =
+    disease.treatmentSteps?.caution && disease.treatmentSteps.caution.length > 0
+      ? disease.treatmentSteps.caution.map(cleanVietnameseText)
+      : isIncurableSystemic
+      ? [
+          'Không mua thuốc phun tràn lan vì thuốc hóa học không chữa khỏi bệnh vi-rút hay vàng lá gân xanh.',
+          'Không dùng cành từ cây bệnh để chiết, ghép hoặc nhân giống.',
+        ]
+      : isBacterial
+      ? [
+          'Không bón thừa phân đạm hoặc phun phân bón lá giàu đạm khi bệnh đang phát triển.',
+          'Không cắt tỉa hoặc đi lại cọ xát nhiều trong vườn/ruộng khi lá đang ướt sương hay vừa mưa xong.',
+        ]
+      : [
+          'Không tự ý pha tăng liều hoặc trộn nhiều loại thuốc cùng lúc dễ gây cháy lá, chai cây.',
+          'Không phun khi trời nắng gắt giữa trưa hoặc sắp có mưa rào lớn.',
+        ];
+
+  const recoverySigns = isIncurableSystemic
+    ? [
+        'Các cây khỏe xung quanh không xuất hiện thêm triệu chứng vàng loang hoặc xoăn lùn mới.',
+        'Đợt đọt non mới ra sạch rầy, rệp chích hút và phát triển đều màu.',
+      ]
+    : isPest
+    ? [
+        'Soi mặt dưới lá non và chùm đọt sau 3–5 ngày không còn thấy sâu/nhện sống bò nhiều.',
+        'Đợt lá non mới ra thẳng, xanh mượt, không bị quăn mép hay thêm vết cạp/chích hút mới.',
+      ]
+    : [
+        'Các vết bệnh cũ khô lại, viền vết gọn rõ, không còn ướt nhũn hay lan rộng thêm (gọi là "đứng vết").',
+        'Không xuất hiện thêm nhiều chấm bệnh mới trên các lá non vừa mở trong 5–7 ngày tiếp theo.',
+      ];
+
+  return {
+    immediate24h: immediate24h.filter(Boolean).slice(0, 4),
+    care3To7Days: care3To7Days.filter(Boolean).slice(0, 4),
+    mildCase,
+    severeCase,
+    doList,
+    dontList,
+    recoverySigns,
+    prevention: preventionBullets,
+  };
 }
 
 export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
@@ -330,9 +524,33 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                         className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300"
                       />
                     ) : (
-                      <span className="text-5xl" aria-hidden="true">
-                        {crop.icon}
-                      </span>
+                      <div className="w-full h-full bg-linear-to-br from-emerald-50/90 via-stone-50 to-amber-50/50 p-4 flex flex-col justify-between text-left">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold uppercase tracking-wide text-emerald-800">
+                            {disease.id.includes('deficiency') || disease.id.includes('toxicity') || disease.id.includes('stress') || disease.id.includes('sunscald')
+                              ? 'Dinh dưỡng & Sinh lý'
+                              : disease.id.includes('thrips') || disease.id.includes('mite') || disease.id.includes('psyllid') || disease.id.includes('planthopper') || disease.id.includes('borer') || disease.id.includes('bug') || disease.id.includes('grub') || disease.id.includes('midge') || disease.id.includes('caterpillar') || disease.id.includes('fly') || disease.id.includes('whitefly') || disease.id.includes('mealybug') || disease.id.includes('scale') || disease.id.includes('beetle') || disease.id.includes('snail') || disease.id.includes('rat') || disease.id.includes('hispa') || disease.id.includes('caseworm') || disease.id.includes('maggot') || disease.id.includes('cutworm') || disease.id.includes('nematode') || disease.id.includes('folder') || disease.id.includes('jassid') || disease.id.includes('termite')
+                              ? 'Sâu & Dịch hại'
+                              : 'Bệnh hại cây trồng'}
+                          </span>
+                          <span className="text-xs text-stone-500 font-medium">
+                            {crop.icon} {crop.label}
+                          </span>
+                        </div>
+
+                        <div className="space-y-1 my-auto py-2">
+                          <p className="text-xs font-semibold text-stone-500">
+                            Dấu hiệu nhận nhanh ngoài đồng:
+                          </p>
+                          <p className="text-sm font-medium text-stone-800 line-clamp-3 leading-snug">
+                            {cleanVietnameseText(disease.symptomChecklist?.[0] || disease.symptoms)}
+                          </p>
+                        </div>
+
+                        <span className="text-xs font-semibold text-emerald-800">
+                          Ảnh mẫu đang cập nhật · Bấm để xem &amp; tìm ảnh thực tế
+                        </span>
+                      </div>
                     )}
 
                     {images.length > 1 && (
@@ -353,39 +571,53 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                       </span>
                     </div>
                     <h3 className="font-bold text-lg text-stone-900 leading-snug">
-                      {disease.vietnameseName}
+                      {cleanVietnameseText(disease.vietnameseName)}
                     </h3>
                     <p className="text-sm sm:text-base text-stone-600 line-clamp-3 leading-relaxed">
-                      {disease.symptoms}
+                      {cleanVietnameseText(disease.symptoms)}
                     </p>
                   </div>
                 </div>
 
-                <div className="px-5 pb-5 pt-2 flex items-center justify-between gap-2">
-                  <button
-                    onClick={() => handleOpenDetail(disease)}
-                    className="flex-1 min-h-[46px] px-4 py-2.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-base font-bold border border-emerald-200 cursor-pointer"
-                  >
-                    Xem ảnh đối chiếu & cách chữa
-                  </button>
+                <div className="px-5 pb-5 pt-2 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      onClick={() => handleOpenDetail(disease)}
+                      className="flex-1 min-h-[46px] px-4 py-2.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-base font-bold border border-emerald-200 cursor-pointer"
+                    >
+                      {primaryImg ? 'Xem ảnh đối chiếu & cách chữa' : 'Xem dấu hiệu & cách chữa'}
+                    </button>
 
-                  {isAdmin && (
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => handleOpenEdit(disease)}
-                        className="p-2.5 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded-xl cursor-pointer min-h-[44px]"
-                        title="Sửa"
-                      >
-                        <Edit3 className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteDisease(disease.id)}
-                        className="p-2.5 text-stone-500 hover:text-red-700 hover:bg-red-50 rounded-xl cursor-pointer min-h-[44px]"
-                        title="Xóa"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
+                    {isAdmin && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleOpenEdit(disease)}
+                          className="p-2.5 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded-xl cursor-pointer min-h-[44px]"
+                          title="Sửa"
+                        >
+                          <Edit3 className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteDisease(disease.id)}
+                          className="p-2.5 text-stone-500 hover:text-red-700 hover:bg-red-50 rounded-xl cursor-pointer min-h-[44px]"
+                          title="Xóa"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {!primaryImg && (
+                    <a
+                      href={buildGoogleImageSearchUrl(disease)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full min-h-[40px] px-3 py-2 rounded-xl border border-stone-200 hover:border-emerald-300 hover:bg-stone-50 text-xs sm:text-sm font-semibold text-stone-700 hover:text-emerald-900 flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5 shrink-0 text-emerald-700" />
+                      <span>Tìm ảnh thực tế đối chiếu trực tuyến</span>
+                    </a>
                   )}
                 </div>
               </div>
@@ -405,10 +637,10 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                 </span>
                 <div>
                   <h3 className="font-bold text-xl text-stone-900 leading-tight">
-                    {selectedDisease.vietnameseName}
+                    {cleanVietnameseText(selectedDisease.vietnameseName)}
                   </h3>
                   <p className="text-xs sm:text-sm text-stone-500 mt-0.5">
-                    {selectedDisease.englishName} • Bộ phận hại:{' '}
+                    {getCropInfo(selectedDisease.cropType).label} · Bộ phận hại:{' '}
                     {selectedDisease.affectedPlantParts.map(getPlantPartLabel).join(', ')}
                   </p>
                 </div>
@@ -423,19 +655,30 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
             </div>
 
             <div className="p-5 sm:p-6 space-y-6 text-base text-stone-800 leading-relaxed">
-              {/* Multi-Photo Reference Gallery */}
-              {selectedImages.length > 0 && (
+              {/* Multi-Photo Reference Gallery or Direct Online Photo Search */}
+              {selectedImages.length > 0 ? (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <h4 className="font-bold text-lg text-stone-900 flex items-center gap-2">
                       <Images className="w-5 h-5 text-emerald-700" />
                       <span>Ảnh mẫu đối chiếu thực tế ({selectedImages.length} ảnh)</span>
                     </h4>
-                    {selectedImages.length > 1 && (
-                      <span className="text-sm font-semibold text-stone-500">
-                        Ảnh {Math.min(activeImageIndex + 1, selectedImages.length)} / {selectedImages.length}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-3">
+                      {selectedImages.length > 1 && (
+                        <span className="text-sm font-semibold text-stone-500">
+                          Ảnh {Math.min(activeImageIndex + 1, selectedImages.length)} / {selectedImages.length}
+                        </span>
+                      )}
+                      <a
+                        href={buildGoogleImageSearchUrl(selectedDisease)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-xs sm:text-sm font-semibold text-emerald-800 hover:underline"
+                      >
+                        <span>Xem thêm ảnh trực tuyến</span>
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                      </a>
+                    </div>
                   </div>
 
                   <div className="relative rounded-2xl overflow-hidden bg-stone-900 border border-stone-200">
@@ -493,7 +736,7 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                   {currentDetailImage && (
                     <div className="bg-stone-50 border border-stone-200 rounded-xl px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-sm">
                       <span className="font-medium text-stone-800">
-                        {currentDetailImage.caption}
+                        {cleanVietnameseText(currentDetailImage.caption)}
                       </span>
                       <span className="text-xs font-semibold text-emerald-800 shrink-0">
                         Nguồn: {currentDetailImage.source}
@@ -538,6 +781,27 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                     </div>
                   )}
                 </div>
+              ) : (
+                <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <p className="font-bold text-stone-900 text-base flex items-center gap-2">
+                      <Images className="w-4 h-4 text-emerald-700 shrink-0" />
+                      <span>Ảnh mẫu đối chiếu đang được cập nhật</span>
+                    </p>
+                    <p className="text-sm text-stone-600 leading-relaxed">
+                      Bệnh này chưa có ảnh mẫu công khai sẵn trong kho nên hệ thống không gắn ảnh thay thế để tránh nhầm triệu chứng. Bác có thể mở trực tiếp ảnh thực tế ngoài đồng trên Google để đối chiếu ngay.
+                    </p>
+                  </div>
+                  <a
+                    href={buildGoogleImageSearchUrl(selectedDisease)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[46px] px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm sm:text-base font-bold inline-flex items-center justify-center gap-2 whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    <ExternalLink className="w-4 h-4 shrink-0" />
+                    <span>Tìm ảnh thực tế trên Google</span>
+                  </a>
+                </div>
               )}
 
               {/* Signs & Symptom Checklist */}
@@ -547,7 +811,7 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                   <span>Dấu hiệu nhận biết ngoài đồng</span>
                 </h4>
                 <div className="bg-stone-50 p-4 rounded-xl border border-stone-200 space-y-3">
-                  <p>{selectedDisease.symptoms}</p>
+                  <p>{cleanVietnameseText(selectedDisease.symptoms)}</p>
                   {selectedDisease.symptomChecklist && selectedDisease.symptomChecklist.length > 0 && (
                     <ul className="space-y-2 pt-2 border-t border-stone-200">
                       {selectedDisease.symptomChecklist.map((item, idx) => (
@@ -555,7 +819,7 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                           <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center shrink-0 mt-1">
                             ✓
                           </span>
-                          <span>{item}</span>
+                          <span>{cleanVietnameseText(item)}</span>
                         </li>
                       ))}
                     </ul>
@@ -570,7 +834,7 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                     Nguyên nhân gây bệnh
                   </h4>
                   <p className="bg-stone-50 p-4 rounded-xl border border-stone-200 text-sm sm:text-base h-full">
-                    {selectedDisease.causes}
+                    {cleanVietnameseText(selectedDisease.causes)}
                   </p>
                 </div>
 
@@ -580,83 +844,139 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                       Điều kiện bệnh dễ phát sinh
                     </h4>
                     <p className="bg-amber-50 p-4 rounded-xl border border-amber-200 text-sm sm:text-base h-full">
-                      {selectedDisease.favorableConditions}
+                      {cleanVietnameseText(selectedDisease.favorableConditions)}
                     </p>
                   </div>
                 )}
               </div>
 
-              {/* Step-by-step Treatment Instructions */}
-              <div className="space-y-3">
-                <h4 className="font-bold text-lg text-emerald-950 flex items-center gap-2">
-                  <Wrench className="w-5 h-5 text-emerald-700" />
-                  <span>Hướng dẫn xử lý & phòng ngừa rõ ràng</span>
-                </h4>
-
-                {selectedDisease.treatmentSteps ? (
-                  <div className="space-y-3">
-                    <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-200 space-y-2">
-                      <p className="font-bold text-emerald-950">
-                        1. Việc cần làm ngay hôm nay:
+              {/* Step-by-step Practical Farmer Treatment Guide */}
+              {(() => {
+                const guide = buildPracticalLibraryGuide(selectedDisease);
+                return (
+                  <div className="space-y-4">
+                    <div className="space-y-1">
+                      <h4 className="font-bold text-lg text-emerald-950 flex items-center gap-2">
+                        <Wrench className="w-5 h-5 text-emerald-700 shrink-0" />
+                        <span>Hướng dẫn xử lý thực tế từng bước ngoài vườn / ruộng</span>
+                      </h4>
+                      <p className="text-sm text-stone-600">
+                        Cụ thể từng việc làm theo thời gian, tách rõ lúc mới bị nhẹ và lúc bị nặng để bác dễ áp dụng.
                       </p>
-                      <ul className="space-y-1.5 list-disc pl-5 text-stone-800">
-                        {selectedDisease.treatmentSteps.immediate.map((step, i) => (
-                          <li key={i}>{step}</li>
-                        ))}
-                      </ul>
                     </div>
 
-                    <div className="bg-teal-50/70 p-4 rounded-xl border border-teal-200 space-y-2">
-                      <p className="font-bold text-teal-950">
-                        2. Cách trị an toàn & chăm sóc phục hồi:
+                    {/* Bước 1: 24 giờ đầu */}
+                    <div className="bg-emerald-50/70 p-4 rounded-xl border border-emerald-200 space-y-2">
+                      <p className="font-bold text-emerald-950 flex items-center gap-2 text-base">
+                        <Clock className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span>Bước 1 · Việc làm ngay trong 24 giờ đầu</span>
                       </p>
-                      <ul className="space-y-1.5 list-disc pl-5 text-stone-800">
-                        {selectedDisease.treatmentSteps.biologicalAndCare.map((step, i) => (
+                      <ol className="space-y-1.5 list-decimal pl-5 text-sm sm:text-base text-stone-800">
+                        {guide.immediate24h.map((step, i) => (
                           <li key={i}>{step}</li>
                         ))}
-                      </ul>
-                      {selectedDisease.preventionMethods && (
-                        <p className="pt-2 border-t border-teal-200 text-stone-800">
-                          <strong>Phòng cho vụ sau:</strong> {selectedDisease.preventionMethods}
-                        </p>
-                      )}
+                      </ol>
                     </div>
 
-                    {selectedDisease.treatmentSteps.caution.length > 0 && (
-                      <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 space-y-2">
-                        <p className="font-bold text-amber-950 flex items-center gap-1.5">
-                          <ShieldAlert className="w-4 h-4 text-amber-700" />
-                          <span>3. Lưu ý quan trọng cần tránh:</span>
+                    {/* Bước 2: 3-7 ngày tới */}
+                    <div className="bg-white p-4 rounded-xl border border-stone-200 space-y-2">
+                      <p className="font-bold text-stone-900 flex items-center gap-2 text-base">
+                        <CalendarDays className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span>Bước 2 · Chăm sóc và phục hồi trong 3–7 ngày tới</span>
+                      </p>
+                      <ol className="space-y-1.5 list-decimal pl-5 text-sm sm:text-base text-stone-800">
+                        {guide.care3To7Days.map((step, i) => (
+                          <li key={i}>{step}</li>
+                        ))}
+                      </ol>
+                    </div>
+
+                    {/* Xử lý theo mức độ nặng / nhẹ */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-sm sm:text-base">
+                      <div className="rounded-xl border border-emerald-200 bg-white p-4 space-y-1.5">
+                        <p className="font-bold text-emerald-950">Khi mới chớm bị nhẹ</p>
+                        <p className="text-stone-800">{guide.mildCase}</p>
+                      </div>
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-4 space-y-1.5">
+                        <p className="font-bold text-amber-950">Khi đã bị nặng, lan rộng</p>
+                        <p className="text-stone-800">{guide.severeCase}</p>
+                      </div>
+                    </div>
+
+                    {/* Bảng ghi nhớ nhanh: Nên làm / Tuyệt đối tránh */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-sm sm:text-base">
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-2">
+                        <p className="font-bold text-emerald-950 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                          <span>Việc NÊN làm</span>
                         </p>
                         <ul className="space-y-1.5 list-disc pl-5 text-stone-800">
-                          {selectedDisease.treatmentSteps.caution.map((step, i) => (
-                            <li key={i}>{step}</li>
+                          {guide.doList.map((item, i) => (
+                            <li key={i}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="rounded-xl border border-red-200 bg-red-50/40 p-4 space-y-2">
+                        <p className="font-bold text-red-950 flex items-center gap-1.5">
+                          <Ban className="w-4 h-4 text-red-700 shrink-0" />
+                          <span>Việc TUYỆT ĐỐI TRÁNH</span>
+                        </p>
+                        <ul className="space-y-1.5 list-disc pl-5 text-stone-800">
+                          {guide.dontList.map((item, i) => (
+                            <li key={i}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+
+                    {/* Bước 3: Kiểm tra sau 5-7 ngày */}
+                    <div className="bg-stone-50 p-4 rounded-xl border border-stone-200 space-y-2 text-sm sm:text-base">
+                      <p className="font-bold text-stone-900 flex items-center gap-2">
+                        <Eye className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span>Bước 3 · Dấu hiệu kiểm tra sau 5–7 ngày xem bệnh đã &ldquo;đứng vết&rdquo; chưa</span>
+                      </p>
+                      <ul className="space-y-1.5 list-disc pl-5 text-stone-800">
+                        {guide.recoverySigns.map((sign, i) => (
+                          <li key={i}>{sign}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    {/* Phòng ngừa cho vụ sau */}
+                    {guide.prevention.length > 0 && (
+                      <div className="bg-stone-50 p-4 rounded-xl border border-stone-200 space-y-1.5 text-sm sm:text-base">
+                        <p className="font-bold text-stone-900">Phòng ngừa cho vụ sau</p>
+                        <ul className="space-y-1 list-disc pl-5 text-stone-800">
+                          {guide.prevention.map((p, i) => (
+                            <li key={i}>{p}</li>
                           ))}
                         </ul>
                       </div>
                     )}
-                  </div>
-                ) : (
-                  <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-200 space-y-2">
-                    <p>{selectedDisease.safeManagement}</p>
-                    {selectedDisease.preventionMethods && (
-                      <p className="pt-2 border-t border-emerald-200 text-stone-800">
-                        <strong>Phòng ngừa:</strong> {selectedDisease.preventionMethods}
+
+                    {/* Nguyên tắc 4 đúng */}
+                    <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 space-y-1.5 text-sm text-amber-950">
+                      <p className="font-bold flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                        <span>Nguyên tắc 4 đúng khi cần dùng thuốc bảo vệ thực vật</span>
                       </p>
-                    )}
+                      <p className="text-xs sm:text-sm font-semibold text-amber-900">
+                        Đúng thuốc · Đúng lúc · Đúng liều lượng in trên nhãn · Đúng cách phun
+                      </p>
+                      <p className="text-stone-800">
+                        Chỉ dùng sản phẩm được phép lưu hành cho đúng loại cây trồng; hỏi thêm cán bộ bảo vệ thực vật địa phương hoặc đại lý vật tư uy tín và pha đúng liều in trên bao bì.
+                      </p>
+                    </div>
                   </div>
-                )}
-              </div>
+                );
+              })()}
 
               {/* Authoritative References */}
               <div className="bg-stone-50 border border-stone-200 rounded-xl p-3.5 text-xs sm:text-sm text-stone-600 flex items-start gap-2.5">
                 <BookOpen className="w-4 h-4 text-stone-500 shrink-0 mt-0.5" />
                 <div>
-                  <span className="font-bold text-stone-800">Tài liệu kiểm chứng: </span>
-                  <span>{selectedDisease.references}</span>
-                  {selectedDisease.standardCode && (
-                    <span className="text-stone-500"> ({selectedDisease.standardCode})</span>
-                  )}
+                  <span className="font-bold text-stone-800">Nguồn tài liệu tham khảo: </span>
+                  <span>Viện Bảo vệ Thực vật Việt Nam và Viện Khoa học Kỹ thuật Nông nghiệp Bắc Trung Bộ</span>
                 </div>
               </div>
             </div>
