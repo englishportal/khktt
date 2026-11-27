@@ -1,4 +1,4 @@
-import { createApiApp } from './app';
+import { createApiApp } from '../server/app.js';
 
 let cachedApp: ReturnType<typeof createApiApp> | null = null;
 
@@ -36,9 +36,8 @@ export default function handler(req: any, res: any): Promise<void> {
           req.originalUrl = req.url;
         } else if (
           parsed.pathname === '/api/index' ||
-          parsed.pathname === '/api/index.js' ||
-          parsed.pathname === '/api/index.cjs' ||
-          parsed.pathname === '/api/index.ts'
+          parsed.pathname === '/api/index.ts' ||
+          parsed.pathname === '/api/index.js'
         ) {
           const qs = parsed.searchParams.toString();
           req.url = `/api${qs ? `?${qs}` : ''}`;

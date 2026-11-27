@@ -1,4 +1,4 @@
-import { DiseaseRecord } from '../types';
+import type { DiseaseRecord } from '../types/index.js';
 
 export const DEFAULT_DISEASES: DiseaseRecord[] = [
   // ==========================================

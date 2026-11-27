@@ -3,8 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { DEFAULT_DISEASES } from '../src/data/defaultDiseases';
-import { createAuthRouter } from './authRoutes';
+import { DEFAULT_DISEASES } from '../src/data/defaultDiseases.js';
+import { createAuthRouter } from './authRoutes.js';
 
 dotenv.config();
 
@@ -63,7 +63,7 @@ function searchRegionalKnowledge(queryText: string, cropFilter?: string): string
       queryLower.includes(d.id.toLowerCase()) ||
       queryLower.includes(d.englishName.toLowerCase()) ||
       d.symptoms.toLowerCase().includes(queryLower) ||
-      (d.affectedPlantParts && d.affectedPlantParts.some((p) => queryLower.includes(p)))
+      (d.affectedPlantParts && d.affectedPlantParts.some((p: string) => queryLower.includes(p)))
     );
   });
 
