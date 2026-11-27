@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 export interface StoredLocalUser {
@@ -14,7 +15,23 @@ export interface StoredLocalUser {
   updatedAt: string;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), '.data');
+function resolveDataDir(): string {
+  if (process.env.VERCEL === '1') {
+    return path.join(os.tmpdir(), 'agrivision-data');
+  }
+  const localDir = path.resolve(process.cwd(), '.data');
+  try {
+    if (!fs.existsSync(localDir)) {
+      fs.mkdirSync(localDir, { recursive: true });
+    }
+    fs.accessSync(localDir, fs.constants.W_OK);
+    return localDir;
+  } catch {
+    return path.join(os.tmpdir(), 'agrivision-data');
+  }
+}
+
+const DATA_DIR = resolveDataDir();
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 
 // Session signing key: read from env or fall back to an in-memory random 32-byte key

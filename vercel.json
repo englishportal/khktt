@@ -1,0 +1,21 @@
+{
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "public/images/**"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index?__vercel_path=$1"
+    },
+    {
+      "source": "/api",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/((?!api/|assets/|images/|manifest\\.json).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
