@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/index.ts": {
-      "includeFiles": "public/images/**"
+      "includeFiles": "public/images/**",
+      "maxDuration": 60
     }
   },
   "rewrites": [

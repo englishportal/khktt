@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { DEFAULT_DISEASES } from '../src/data/defaultDiseases';
 import { createAuthRouter } from './authRoutes';
 
@@ -214,6 +214,17 @@ function getRequestOrigin(req: Request): string | undefined {
   return `${proto}://${host}`;
 }
 
+function buildCropDiagnosisContext(cropType: string): string {
+  const filtered = DEFAULT_DISEASES.filter((d) => d.cropType === cropType);
+  const list = filtered.length > 0 ? filtered : DEFAULT_DISEASES;
+  return list
+    .map(
+      (d) =>
+        `- [${d.id}] ${d.vietnameseName} (${d.englishName}) | Bộ phận: ${d.affectedPlantParts.join(', ')} | Triệu chứng: ${d.symptoms}`
+    )
+    .join('\n');
+}
+
 export function createApiApp() {
   const app = express();
   app.set('trust proxy', 1);
@@ -282,6 +293,7 @@ export function createApiApp() {
           : plantPart === 'fruit'
           ? 'Quả/Củ'
           : 'Khác';
+      const cropKnowledgeContext = buildCropDiagnosisContext(cropType);
 
       const systemInstruction = `
 Bạn là chuyên gia chẩn đoán bệnh học thực vật cao cấp thuộc Viện Khoa học Nông nghiệp Bắc Trung Bộ và Viện Bảo vệ Thực vật Việt Nam.
@@ -327,7 +339,7 @@ CÁC NGUYÊN TẮC KHOA HỌC TỐI THƯỢNG (BẮT BUỘC):
    - CHỈ đặt selectedCropMatches = false và possibleDiagnoses = [] khi ảnh RÕ RÀNG thuộc loài cây khác (ví dụ: chọn Lúa nhưng ảnh là lá Lạc hoặc lá Cam). Với ảnh chụp cận cảnh vết bệnh trên vỏ quả, thân hoặc một góc lá không thấy rõ hình thái toàn lá, hãy tin tưởng loài cây người dùng đã chọn và chẩn đoán dựa trên triệu chứng quan sát được.
 4. CHẨN ĐOÁN ĐÚNG BỆNH THỰC TẾ TRÊN ẢNH (KHÔNG ÉP VÀO DANH SÁCH MẪU):
    - Quan sát kỹ hình dạng vết bệnh, màu sắc, viền quầng, lớp phấn/bào tử nấm, đường hầm sâu đục, biến dạng mô hay dấu hiệu thiếu dinh dưỡng trên ảnh.
-   - Nếu triệu chứng khớp với một trong ${DEFAULT_DISEASES.length} bệnh/dịch hại trong cơ sở dữ liệu vùng Bắc Trung Bộ bên dưới, hãy dùng đúng mã diseaseId và tên bệnh tương ứng.
+   - Nếu triệu chứng khớp với một trong các bệnh/dịch hại của ${cropNameVi} trong cơ sở dữ liệu bên dưới, hãy dùng đúng mã diseaseId và tên bệnh tương ứng.
    - NẾU triệu chứng trên ảnh là một bệnh hại, sâu hại hoặc rối loạn dinh dưỡng KHÁC ngoài danh sách tham khảo (ví dụ: thiếu đạm/kali/kẽm/magie, cháy nắng, ngộ độc phèn...), TUYỆT ĐỐI KHÔNG gán ép sai bệnh. Hãy chẩn đoán đúng tên bệnh/sâu hại/thiếu chất thực tế đó bằng tiếng Việt chính xác kèm mã diseaseId mô tả phù hợp (ví dụ: nutrient_deficiency_zinc, sunscald).
 5. KHÔNG TỰ BỊA ĐẶT PHẦN TRĂM XÁC SUẤT:
    - Tuyệt đối KHÔNG gán con số phần trăm (như 95%, 80%).
@@ -335,9 +347,8 @@ CÁC NGUYÊN TẮC KHOA HỌC TỐI THƯỢNG (BẮT BUỘC):
 6. KHÔNG KHIÊN CƯỠNG CHẨN ĐOÁN (TRANSPARENT UNCERTAINTY):
    - Nếu triệu chứng chưa rõ ràng hoặc tương đồng giữa 2 nguyên nhân (ví dụ đốm nâu vs đạo ôn non, hoặc vàng lá HLB vs thiếu vi lượng kẽm), phải nêu rõ trong alternativeCauses và needsMoreImages = true kèm hướng dẫn chụp bổ sung (additionalImageInstructions).
    - Không được khẳng định các triệu chứng không nhìn thấy trên ảnh.
-7. CƠ SỞ DỮ LIỆU THAM KHẢO KHU VỰC BẮC TRUNG BỘ:
-   Sử dụng cơ sở dữ liệu bệnh thực vật đã được xác thực sau đây để đối chiếu khi triệu chứng phù hợp:
-   ${REGIONAL_KNOWLEDGE_CONTEXT}
+7. CƠ SỞ DỮ LIỆU THAM KHẢO (${cropNameVi}):
+   ${cropKnowledgeContext}
 8. HƯỚNG DẪN XỬ LÝ RÕ RÀNG, DỄ LÀM CHO NÔNG DÂN (QUAN TRỌNG):
    - Trình bày phần actionPlan thật cụ thể, câu ngắn gọn, dễ hiểu với bà con nông dân:
      + immediateSteps (2-3 bước): Việc cần làm NGAY HÔM NAY (ví dụ: ngắt bỏ lá bệnh cho vào túi kín, tháo/giữ mực nước ruộng mấy cm, ngừng bón đạm ngay...).
@@ -418,6 +429,9 @@ Vui lòng kết hợp chặt chẽ hình ảnh ở mọi góc chụp và câu tr
             ],
             config: {
               systemInstruction,
+              thinkingConfig: {
+                thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
+              },
               responseMimeType: 'application/json',
               responseSchema: {
                 type: Type.OBJECT,
@@ -576,6 +590,9 @@ ${REGIONAL_KNOWLEDGE_CONTEXT}
               contents: fullPrompt,
               config: {
                 systemInstruction,
+                thinkingConfig: {
+                  thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
+                },
               },
             });
             if (response.text) {

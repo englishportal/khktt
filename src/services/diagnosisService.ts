@@ -77,10 +77,21 @@ export async function runServerDiagnosis(
     if (parsedErr && !response.ok) {
       throw new Error(parsedErr.error || parsedErr.details || 'Lỗi khi gửi ảnh phân tích đến máy chủ.');
     }
+    if (response.status === 413) {
+      throw new Error('Ảnh có dung lượng quá lớn. Bác vui lòng chọn ảnh nhẹ hơn hoặc chụp lại nhé.');
+    }
+    if (response.status === 404) {
+      throw new Error(
+        'Không tìm thấy cổng API phân tích (/api/diagnose - 404). Nếu đang chạy trên Vercel, vui lòng đẩy code mới nhất (kèm thư mục api/ và vercel.json) lên GitHub và Redeploy.'
+      );
+    }
+    if (response.status === 504) {
+      throw new Error(
+        'Máy chủ phân tích phản hồi quá thời gian chờ (504). Bác vui lòng thử lại với 1 ảnh rõ nét nhé.'
+      );
+    }
     throw new Error(
-      response.status === 413
-        ? 'Ảnh có dung lượng quá lớn. Bác vui lòng chọn ảnh nhẹ hơn hoặc chụp lại nhé.'
-        : 'Máy chủ phân tích đang bận hoặc kết nối tạm gián đoạn. Bác vui lòng bấm thử lại sau vài giây nhé.'
+      `Máy chủ phân tích đang bận hoặc kết nối tạm gián đoạn (Mã ${response.status}). Bác vui lòng bấm thử lại sau vài giây nhé.`
     );
   }
 
