@@ -34,7 +34,10 @@ const REGIONAL_KNOWLEDGE_CONTEXT = DEFAULT_DISEASES.map(
 ).join('\n');
 
 // Models to try in order of availability and speed
-const CANDIDATE_MODELS = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+const ENV_GEMINI_MODEL = (process.env.GEMINI_MODEL || '').trim();
+const CANDIDATE_MODELS = Array.from(
+  new Set([...(ENV_GEMINI_MODEL ? [ENV_GEMINI_MODEL] : []), 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'])
+);
 
 // Helper to detect 403 / billing / permission errors from Google Cloud Gemini API
 function isPermissionOrBillingError(err: any): boolean {
@@ -539,9 +542,20 @@ Vui lòng kết hợp chặt chẽ hình ảnh ở mọi góc chụp và câu tr
         });
       }
 
+      const rawErrMsg = String(lastError?.message || lastError || '');
+      const errLower = rawErrMsg.toLowerCase();
+      let friendly502 = 'Không thể phân tích hình ảnh qua dịch vụ AI lúc này. Bác vui lòng thử lại sau ít phút.';
+      if (errLower.includes('api key not valid') || errLower.includes('api_key_invalid') || errLower.includes('invalid api key')) {
+        friendly502 = 'GEMINI_API_KEY trên máy chủ không hợp lệ. Vui lòng kiểm tra lại biến môi trường GEMINI_API_KEY trên Vercel.';
+      } else if (errLower.includes('429') || errLower.includes('quota') || errLower.includes('resource_exhausted')) {
+        friendly502 = 'Khóa GEMINI_API_KEY đang vượt quá hạn mức miễn phí (429). Bác vui lòng chờ 1 phút rồi thử lại nhé.';
+      } else if (errLower.includes('not found') || errLower.includes('not_found') || errLower.includes('is not supported')) {
+        friendly502 = 'Model AI hiện tại chưa khả dụng với GEMINI_API_KEY đang cấu hình. Vui lòng kiểm tra lại cấu hình API Key hoặc biến GEMINI_MODEL trên Vercel.';
+      }
+
       return res.status(502).json({
-        error: 'Không thể phân tích hình ảnh qua dịch vụ AI lúc này. Bác vui lòng thử lại sau ít phút.',
-        details: lastError?.message || String(lastError || ''),
+        error: friendly502,
+        details: rawErrMsg,
       });
     } catch (error: any) {
       console.error('Error during Gemini plant diagnosis:', error);

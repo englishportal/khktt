@@ -36,6 +36,7 @@ export default function handler(req: any, res: any): Promise<void> {
           req.originalUrl = req.url;
         } else if (
           parsed.pathname === '/api/index' ||
+          parsed.pathname === '/api/index.js' ||
           parsed.pathname === '/api/index.cjs' ||
           parsed.pathname === '/api/index.ts'
         ) {
