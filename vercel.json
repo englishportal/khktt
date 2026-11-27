@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/index.ts": {
+    "api/index.cjs": {
       "includeFiles": "public/images/**",
       "maxDuration": 60
     }

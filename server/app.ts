@@ -232,8 +232,13 @@ export function createApiApp() {
   // If a serverless host (e.g. Vercel @vercel/node) already pre-parsed req.body,
   // mark _body so express.json() does not wait on a consumed request stream.
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    if (req.body !== undefined && req.body !== null && typeof req.body === 'object') {
-      (req as any)._body = true;
+    try {
+      const preParsed = (req as any).body;
+      if (preParsed !== undefined && preParsed !== null && typeof preParsed === 'object') {
+        (req as any)._body = true;
+      }
+    } catch {
+      // Ignore lazy req.body getter errors so Express middleware can handle/report JSON cleanly
     }
     next();
   });
@@ -418,95 +423,108 @@ Vui lòng kết hợp chặt chẽ hình ảnh ở mọi góc chụp và câu tr
       ];
 
       for (const model of CANDIDATE_MODELS) {
-        try {
-          const response = await ai.models.generateContent({
-            model,
-            contents: [
-              ...imageParts,
-              {
-                text: userPrompt,
-              },
-            ],
-            config: {
-              systemInstruction,
-              thinkingConfig: {
-                thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
-              },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  isPlantImage: { type: Type.BOOLEAN },
-                  cropDetected: { type: Type.STRING },
-                  selectedCropMatches: { type: Type.BOOLEAN },
-                  imageQuality: { type: Type.STRING },
-                  qualityIssues: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  symptoms: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  possibleDiagnoses: {
-                    type: Type.ARRAY,
-                    items: {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const response = await ai.models.generateContent({
+              model,
+              contents: [
+                ...imageParts,
+                {
+                  text: userPrompt,
+                },
+              ],
+              config: {
+                systemInstruction,
+                abortSignal: AbortSignal.timeout(22000),
+                thinkingConfig: {
+                  thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
+                },
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    isPlantImage: { type: Type.BOOLEAN },
+                    cropDetected: { type: Type.STRING },
+                    selectedCropMatches: { type: Type.BOOLEAN },
+                    imageQuality: { type: Type.STRING },
+                    qualityIssues: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    symptoms: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    possibleDiagnoses: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          diseaseId: { type: Type.STRING },
+                          diseaseName: { type: Type.STRING },
+                          evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+                          confidenceLevel: { type: Type.STRING },
+                        },
+                        required: ['diseaseId', 'diseaseName', 'evidence', 'confidenceLevel'],
+                      },
+                    },
+                    alternativeCauses: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    severityAssessment: { type: Type.STRING },
+                    needsMoreImages: { type: Type.BOOLEAN },
+                    additionalImageInstructions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    actionPlan: {
                       type: Type.OBJECT,
                       properties: {
-                        diseaseId: { type: Type.STRING },
-                        diseaseName: { type: Type.STRING },
-                        evidence: { type: Type.ARRAY, items: { type: Type.STRING } },
-                        confidenceLevel: { type: Type.STRING },
+                        immediateSteps: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        safeCareAndPrevention: { type: Type.ARRAY, items: { type: Type.STRING } },
+                        importantWarnings: { type: Type.ARRAY, items: { type: Type.STRING } },
                       },
-                      required: ['diseaseId', 'diseaseName', 'evidence', 'confidenceLevel'],
+                      required: ['immediateSteps', 'safeCareAndPrevention', 'importantWarnings'],
                     },
+                    expertVerificationRecommended: { type: Type.BOOLEAN },
+                    disclaimer: { type: Type.STRING },
                   },
-                  alternativeCauses: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  severityAssessment: { type: Type.STRING },
-                  needsMoreImages: { type: Type.BOOLEAN },
-                  additionalImageInstructions: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  actionPlan: {
-                    type: Type.OBJECT,
-                    properties: {
-                      immediateSteps: { type: Type.ARRAY, items: { type: Type.STRING } },
-                      safeCareAndPrevention: { type: Type.ARRAY, items: { type: Type.STRING } },
-                      importantWarnings: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    },
-                    required: ['immediateSteps', 'safeCareAndPrevention', 'importantWarnings'],
-                  },
-                  expertVerificationRecommended: { type: Type.BOOLEAN },
-                  disclaimer: { type: Type.STRING },
+                  required: [
+                    'isPlantImage',
+                    'cropDetected',
+                    'selectedCropMatches',
+                    'imageQuality',
+                    'qualityIssues',
+                    'symptoms',
+                    'possibleDiagnoses',
+                    'alternativeCauses',
+                    'severityAssessment',
+                    'needsMoreImages',
+                    'additionalImageInstructions',
+                    'recommendations',
+                    'actionPlan',
+                    'expertVerificationRecommended',
+                    'disclaimer',
+                  ],
                 },
-                required: [
-                  'isPlantImage',
-                  'cropDetected',
-                  'selectedCropMatches',
-                  'imageQuality',
-                  'qualityIssues',
-                  'symptoms',
-                  'possibleDiagnoses',
-                  'alternativeCauses',
-                  'severityAssessment',
-                  'needsMoreImages',
-                  'additionalImageInstructions',
-                  'recommendations',
-                  'actionPlan',
-                  'expertVerificationRecommended',
-                  'disclaimer',
-                ],
               },
-            },
-          });
+            });
 
-          if (response.text) {
-            const cleanJson = response.text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-            parsedResult = JSON.parse(cleanJson);
+            if (response.text) {
+              const cleanJson = response.text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+              parsedResult = JSON.parse(cleanJson);
+              break;
+            }
+          } catch (apiErr: any) {
+            lastError = apiErr;
+            if (isPermissionOrBillingError(apiErr)) {
+              permissionOrBillingFailure = true;
+              console.error('[AgriVision AI] Gemini API permission or billing error:', apiErr?.message || apiErr);
+              break;
+            }
+            const errMsg = String(apiErr?.message || apiErr || '').toLowerCase();
+            const isTransient = errMsg.includes('503') || errMsg.includes('unavailable') || errMsg.includes('429');
+            console.warn(`[AgriVision AI] Model ${model} (attempt ${attempt + 1}) failed:`, apiErr?.message || apiErr);
+            if (isTransient && attempt === 0) {
+              await new Promise((r) => setTimeout(r, 1200));
+              continue;
+            }
+            await new Promise((r) => setTimeout(r, 500));
             break;
           }
-        } catch (apiErr: any) {
-          lastError = apiErr;
-          if (isPermissionOrBillingError(apiErr)) {
-            permissionOrBillingFailure = true;
-            console.error('[AgriVision AI] Gemini API permission or billing error:', apiErr?.message || apiErr);
-            break;
-          }
-          console.warn(`[AgriVision AI] Model ${model} failed:`, apiErr?.message || apiErr);
-          await new Promise((r) => setTimeout(r, 600));
+        }
+        if (parsedResult || permissionOrBillingFailure) {
+          break;
         }
       }
 
