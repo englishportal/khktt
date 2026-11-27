@@ -435,7 +435,7 @@ Vui lòng kết hợp chặt chẽ hình ảnh ở mọi góc chụp và câu tr
               ],
               config: {
                 systemInstruction,
-                abortSignal: AbortSignal.timeout(22000),
+                abortSignal: AbortSignal.timeout(model === 'gemini-4-hydrogen' ? 12000 : 15000),
                 thinkingConfig: {
                   thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
                 },
@@ -608,6 +608,7 @@ ${REGIONAL_KNOWLEDGE_CONTEXT}
               contents: fullPrompt,
               config: {
                 systemInstruction,
+                abortSignal: AbortSignal.timeout(10000),
                 thinkingConfig: {
                   thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
                 },
