@@ -11,7 +11,6 @@ import {
   sanitizeDiagnosisResultToVietnamese,
   stripEnglishParentheticals,
 } from '../src/utils/vietnameseText.js';
-import { extractMedicinesFromText } from '../src/utils/googleMedicineSearch.js';
 import { createAuthRouter } from './authRoutes.js';
 
 dotenv.config();
@@ -171,6 +170,7 @@ function isPermissionOrBillingError(err: any): boolean {
     code === 403 ||
     status === 'permission_denied' ||
     msg.includes('permission_denied') ||
+    msg.includes('"code":403') ||
     msg.includes('free tier is not available')
   );
 }
@@ -269,24 +269,26 @@ async function resolveImageBase64(
 ): Promise<{ base64: string; mimeType: string }> {
   const rootDir = process.cwd();
 
-  if (input.startsWith('/images/')) {
-    const rel = input.replace(/^\/images\//, '');
-    const publicImagesDir = path.resolve(rootDir, 'public', 'images');
-    const resolvedPublic = path.resolve(publicImagesDir, rel);
-    if (resolvedPublic.startsWith(publicImagesDir + path.sep) && fs.existsSync(resolvedPublic)) {
+  if (input.startsWith('/images/') || input.startsWith('/assets/')) {
+    const isAssets = input.startsWith('/assets/');
+    const subFolder = isAssets ? 'assets' : 'images';
+    const rel = input.replace(/^\/(images|assets)\//, '');
+    const publicDir = path.resolve(rootDir, 'public', subFolder);
+    const resolvedPublic = path.resolve(publicDir, rel);
+    if (resolvedPublic.startsWith(publicDir + path.sep) && fs.existsSync(resolvedPublic)) {
       const base64 = fs.readFileSync(resolvedPublic).toString('base64');
       return { base64, mimeType: fallbackMime };
     }
 
-    const distImagesDir = path.resolve(rootDir, 'dist', 'images');
-    const resolvedDist = path.resolve(distImagesDir, rel);
-    if (resolvedDist.startsWith(distImagesDir + path.sep) && fs.existsSync(resolvedDist)) {
+    const distDir = path.resolve(rootDir, 'dist', subFolder);
+    const resolvedDist = path.resolve(distDir, rel);
+    if (resolvedDist.startsWith(distDir + path.sep) && fs.existsSync(resolvedDist)) {
       const base64 = fs.readFileSync(resolvedDist).toString('base64');
       return { base64, mimeType: fallbackMime };
     }
 
     // Fallback for serverless platforms where public assets are served via CDN origin
-    if (reqOrigin && /^\/images\/[a-zA-Z0-9_.-]+\.(jpg|jpeg|png|webp)$/i.test(input)) {
+    if (reqOrigin && /^\/(images|assets)\/[a-zA-Z0-9_./-]+\.(jpg|jpeg|png|webp)$/i.test(input)) {
       const cdnRes = await fetch(`${reqOrigin}${input}`, { signal: AbortSignal.timeout(8000) });
       if (cdnRes.ok) {
         const contentType = cdnRes.headers.get('content-type') || fallbackMime;
@@ -341,14 +343,11 @@ function getRequestOrigin(req: Request): string | undefined {
 function buildCropDiagnosisContext(cropType: string, plantPart?: string): string {
   const filtered = DEFAULT_DISEASES.filter((d) => d.cropType === cropType);
   const pool = filtered.length > 0 ? filtered : DEFAULT_DISEASES;
-  const shouldPrioritizePart = Boolean(plantPart && plantPart !== 'other');
-  const prioritized = shouldPrioritizePart
-    ? [...pool].sort((a, b) => {
-        const aMatch = a.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
-        const bMatch = b.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
-        return bMatch - aMatch;
-      })
-    : pool;
+  const prioritized = [...pool].sort((a, b) => {
+    const aMatch = plantPart && a.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
+    const bMatch = plantPart && b.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
+    return bMatch - aMatch;
+  });
 
   return prioritized
     .map((d) => {
@@ -390,7 +389,7 @@ export function createApiApp() {
         imageBase64,
         mimeType = 'image/jpeg',
         cropType = 'citrus',
-        plantPart = 'other',
+        plantPart = 'leaf',
         extraImages = [],
         quizAnswers,
       } = req.body || {};
@@ -425,7 +424,6 @@ export function createApiApp() {
           : cropType === 'rice'
           ? 'Lúa nước'
           : 'Lạc (Đậu phộng)';
-      const hasSpecificPart = plantPart === 'leaf' || plantPart === 'stem' || plantPart === 'fruit';
       const partNameVi =
         plantPart === 'leaf'
           ? 'Lá'
@@ -433,7 +431,7 @@ export function createApiApp() {
           ? 'Thân/Cành'
           : plantPart === 'fruit'
           ? 'Quả/Củ'
-          : 'Tự nhận diện qua ảnh (lá, thân, cành, quả hoặc toàn cây)';
+          : 'Khác';
       const cropKnowledgeContext = buildCropDiagnosisContext(cropType, plantPart);
 
       const systemInstruction = `
@@ -493,8 +491,7 @@ CÁC NGUYÊN TẮC KHOA HỌC TỐI THƯỢNG (BẮT BUỘC):
      + immediate24hSteps (2-4 việc làm cụ thể trong 24 giờ đầu: cắt bỏ lá/cành bệnh cách vết bệnh bao xa, gom vào bao mang ra khỏi vườn tiêu hủy, lau khử kéo bằng cồn hoặc nước vôi, tạm ngừng bón đạm/tưới phun mưa lên tán, rút bớt nước hay giữ mực nước nông tùy bệnh...).
      + careNext3To7Days (2-3 việc chăm sóc và phục hồi trong 3-7 ngày tới: bón bổ sung phân hữu cơ hoai mục, chế phẩm nấm đối kháng, vôi bột khử chua, phun vào sáng sớm hoặc chiều mát ướt đều hai mặt lá nếu cần).
      + mildVsSevereGuide: Tách rõ mildCase (cách xử lý khi mới chớm bị nhẹ vài lá hoặc vài khóm/cây) và severeCase (cách xử lý khi đã bị nặng, lan rộng; ĐẶC BIỆT với bệnh nan y không có thuốc chữa khỏi như Vàng lá gân xanh nặng hay vi-rút lùn xoắn lá nặng thì phải nói thẳng không tốn tiền mua thuốc phun mà cần chặt bỏ/nhổ tiêu hủy cây nặng để cứu cả vườn).
-     + suggestedActiveIngredients (1-3 tên thuốc hoặc nhóm hoạt chất chính được phép lưu hành tại Việt Nam phù hợp đúng bệnh và đúng cây trồng — có thể kèm tên hoạt chất chuẩn để bà con ra đại lý vật tư nông nghiệp hỏi mua đúng loại).
-     + suggestedPesticides (1-4 mục chi tiết đối chiếu từ dữ liệu tìm kiếm Google và tài liệu Cục Bảo vệ Thực vật / Khuyến nông: ghi rõ productOrIngredientName, activeIngredient chuẩn, category: "biological" | "chemical" | "mineral" | "none", targetUse, sprayGuidance — hướng dẫn thời điểm và cách phun ngoài vườn nhưng TUYỆT ĐỐI KHÔNG tự bịa liều lượng pha chế nếu không có trên nhãn, và googleSearchQuery để bà con bấm tìm ngay thông tin thuốc đó trên Google). Nếu cây khỏe mạnh, ảnh mờ, hoặc lệch loài thì trả về []. Nếu là bệnh nan y như vàng lá gân xanh nặng không có thuốc chữa khỏi bệnh thì ghi rõ category "none" hoặc chỉ gợi ý thuốc/dầu khoáng diệt côn trùng môi giới rầy chổng cánh.
+     + suggestedActiveIngredients (1-3 gợi ý nhóm hoạt chất hoặc chế phẩm sinh học phổ biến được phép lưu hành tại Việt Nam phù hợp đúng bệnh và đúng cây trồng để bà con mang tên ra đại lý vật tư nông nghiệp hỏi mua — ví dụ nhóm gốc đồng, dầu khoáng nông nghiệp sinh học, chế phẩm nấm đối kháng bón gốc, nhóm hoạt chất đặc trị nấm đạo ôn/đốm lá... TUYỆT ĐỐI KHÔNG tự ghi liều lượng pha chế như ml/bình hay gam/lít. Nếu cây khỏe mạnh hoặc bệnh nan y không có thuốc đặc trị thì ghi rõ không cần phun thuốc hóa học).
      + doList (2-3 việc NÊN làm) và dontList (2-3 việc TUYỆT ĐỐI TRÁNH để khỏi làm bệnh bùng nặng hơn).
      + recoveryCheckSigns (2-3 dấu hiệu cụ thể sau 5-7 ngày để bà con tự kiểm tra xem vết bệnh đã khô "đứng vết" hay vẫn đang lan rộng thêm).
      + pesticideSafetyNote: Nhắc rõ Nguyên tắc 4 đúng (đúng thuốc, đúng lúc, đúng liều in trên nhãn bao bì, đúng cách) và khuyên hỏi thêm cán bộ bảo vệ thực vật địa phương.
@@ -521,7 +518,7 @@ CÁC NGUYÊN TẮC KHOA HỌC TỐI THƯỢNG (BẮT BUỘC):
       const userPrompt = `
 Hãy phân tích tổng hợp hình ảnh và thông tin thực địa sau đây (TRẢ LỜI 100% THUẦN TIẾNG VIỆT, KHÔNG DÙNG TIẾNG ANH):
 - Cây trồng người dùng đã chọn: ${cropNameVi}
-- Bộ phận quan sát: ${hasSpecificPart ? partNameVi : 'Tự nhận diện trực tiếp từ ảnh chụp (có thể là lá, thân, cành, quả, củ hoặc toàn cây).'}
+- Bộ phận quan sát chính: ${partNameVi}
 - Số lượng góc ảnh: ${angleSummary}
 - Khu vực địa lý trọng tâm: Vùng Bắc Trung Bộ Việt Nam (Nghệ An, Hà Tĩnh, Quảng Bình, Quảng Trị, Thừa Thiên Huế).
 ${
@@ -663,9 +660,9 @@ Yêu cầu:
 
       const ai = getGeminiClient();
       if (!ai) {
-        return res.status(503).json({
+        return res.status(500).json({
           error:
-            'Hệ thống phân tích ảnh AI chưa sẵn sàng do chưa được cấp cấu hình GEMINI_API_KEY trên máy chủ. Vui lòng thử lại sau hoặc tra cứu trực tiếp trong mục Sổ bệnh.',
+            'Hệ thống phân tích ảnh AI chưa sẵn sàng do chưa được cấp cấu hình GEMINI_API_KEY trên máy chủ. Vui lòng kiểm tra khóa API trong Settings > Secrets hoặc tra cứu trực tiếp trong mục Sổ bệnh.',
         });
       }
 
@@ -678,7 +675,7 @@ Yêu cầu:
           })
         : '';
       const cacheHasher = crypto.createHash('sha256');
-      cacheHasher.update(`v10|${aiClientKeyFingerprint}|${cropType}|${plantPart}|${normalizedQuizKey}|`);
+      cacheHasher.update(`v9|${aiClientKeyFingerprint}|${cropType}|${plantPart}|${normalizedQuizKey}|`);
       cacheHasher.update(mainImage.base64);
       for (const extra of resolvedExtras) {
         cacheHasher.update(`|${extra.angleLabel}|${extra.base64}`);
@@ -868,30 +865,7 @@ Yêu cầu:
               suggestedActiveIngredients: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description: '1-3 tên thuốc hoặc hoạt chất phổ biến được phép lưu hành tại Việt Nam để nông dân hỏi mua ở đại lý vật tư (không tự bịa liều lượng pha chế).',
-              },
-              suggestedPesticides: {
-                type: Type.ARRAY,
-                description: '1-4 gợi ý thuốc bảo vệ thực vật / hoạt chất / chế phẩm sinh học chính xác đối chiếu từ Google Search và tài liệu Cục BVTV / Khuyến nông Việt Nam.',
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    productOrIngredientName: { type: Type.STRING },
-                    activeIngredient: { type: Type.STRING },
-                    category: { type: Type.STRING },
-                    targetUse: { type: Type.STRING },
-                    sprayGuidance: { type: Type.STRING },
-                    googleSearchQuery: { type: Type.STRING },
-                  },
-                  required: [
-                    'productOrIngredientName',
-                    'activeIngredient',
-                    'category',
-                    'targetUse',
-                    'sprayGuidance',
-                    'googleSearchQuery',
-                  ],
-                },
+                description: '1-3 nhóm hoạt chất hoặc chế phẩm sinh học phổ biến được phép lưu hành tại Việt Nam để nông dân hỏi mua ở đại lý vật tư (TUYỆT ĐỐI không ghi liều lượng pha chế).',
               },
               doList: {
                 type: Type.ARRAY,
@@ -920,7 +894,6 @@ Yêu cầu:
               'careNext3To7Days',
               'mildVsSevereGuide',
               'suggestedActiveIngredients',
-              'suggestedPesticides',
               'doList',
               'dontList',
               'recoveryCheckSigns',
@@ -967,7 +940,7 @@ Yêu cầu:
         ],
       };
 
-      const requestDeadline = Date.now() + 58000;
+      const requestDeadline = Date.now() + 26000;
       const getTimeoutMs = (capMs: number) => Math.max(0, Math.min(capMs, requestDeadline - Date.now()));
       const now = Date.now();
       let googleSearchQuotaExceeded = searchQuotaCooldownUntil > now;
@@ -977,7 +950,7 @@ Yêu cầu:
       let stage1ModelUsed = '';
       let stage1ReportText = '';
       for (const model of CANDIDATE_MODELS) {
-        if (getTimeoutMs(10000) < 4500) break;
+        if (getTimeoutMs(10000) < 4000) break;
         const dailyCooldown = modelDailyExhaustedUntil.get(model) || 0;
         if (dailyCooldown > Date.now()) {
           if (!lastError) {
@@ -986,8 +959,8 @@ Yêu cầu:
           continue;
         }
 
-        const stage1Timeout = getTimeoutMs(model === 'gemini-4-hydrogen' ? 24000 : 18000);
-        if (googleSearchQuotaExceeded || stage1Timeout < 4500) {
+        const stage1Timeout = getTimeoutMs(model === 'gemini-4-hydrogen' ? 9500 : 8500);
+        if (googleSearchQuotaExceeded || stage1Timeout < 4000) {
           break;
         }
 
@@ -998,11 +971,11 @@ Yêu cầu:
             contents: [
               ...imageParts,
               {
-                text: `Bạn là AI bước 1 (Phân tích ảnh & Tra cứu đa nguồn). Người dùng đang chọn khám ${cropNameVi}${hasSpecificPart ? ` (bộ phận: ${partNameVi})` : ' (tự nhận diện bộ phận cây trong ảnh)'}. Hãy thực hiện đúng 3 việc sau:
+                text: `Bạn là AI bước 1 (Phân tích ảnh & Tra cứu đa nguồn). Người dùng đang chọn khám ${cropNameVi} (bộ phận: ${partNameVi}). Hãy thực hiện đúng 3 việc sau:
 1. KIỂM TRA LOÀI CÂY & DẤU HIỆU TRÊN ẢNH: Xác nhận loài cây thực tế trong ảnh có đúng ${cropNameVi} không (nếu là cây khác như cây ổi, cây xoài, cây mít, cây lúa, cây lạc... ghi rõ tên tiếng Việt chính xác). Mô tả khách quan mọi dấu hiệu bất thường quan sát thấy trên ảnh (hình dạng vết bệnh, quầng vàng, nốt sùi nổi gồ hay phẳng, đối xứng hay loang lổ, đường hầm, tơ nhện, bào tử nấm...).
 2. GIẢ THUYẾT BAN ĐẦU (TỐI ĐA 3 BỆNH): Nêu 1 giả thuyết bệnh phù hợp nhất và 1-2 bệnh có biểu hiện tương tự dễ nhầm lẫn nhất (nếu lá/cây khỏe mạnh thì ghi rõ khỏe mạnh).
-3. BẮT BUỘC GỌI GOOGLE SEARCH ĐA NGUỒN: Nếu đúng là ${cropNameVi} và có dấu hiệu bất thường, bắt buộc gọi công cụ Google Search để truy xuất tài liệu từ NHIỀU nguồn độc lập — ưu tiên Cục Bảo vệ Thực vật, Trung tâm Khuyến nông, Viện Bảo vệ Thực vật, Học viện Nông nghiệp Việt Nam, Đại học Cần Thơ. Thu thập CẢ triệu chứng phân biệt LẪN **tên hoạt chất và thuốc bảo vệ thực vật được phép lưu hành tại Việt Nam** khuyến cáo phun trị bệnh này.
-Trình bày ngắn gọn (<260 từ), nêu rõ: [Loài cây], [Giả thuyết ban đầu], [Bệnh dễ nhầm], [Điểm phân biệt từ tài liệu đa nguồn], [Hoạt chất / thuốc BVTV khuyến cáo].`,
+3. BẮT BUỘC GỌI GOOGLE SEARCH ĐA NGUỒN: Nếu đúng là ${cropNameVi} và có dấu hiệu bất thường, bắt buộc gọi công cụ Google Search để truy xuất tài liệu từ NHIỀU nguồn độc lập — ưu tiên cơ quan nông nghiệp (Cục Bảo vệ Thực vật, Trung tâm Khuyến nông, Sở Nông nghiệp .gov.vn), trường đại học và viện nghiên cứu (Viện Bảo vệ Thực vật, Học viện Nông nghiệp Việt Nam, Đại học Cần Thơ, Viện Cây ăn quả Miền Nam, tài liệu khoa học). Thu thập triệu chứng, nguyên nhân, đặc điểm phân biệt từng bệnh.
+Trình bày ngắn gọn (<220 từ), thuần tiếng Việt, nêu rõ: [Loài cây], [Giả thuyết ban đầu], [Bệnh dễ nhầm], [Điểm phân biệt từ tài liệu đa nguồn].`,
               },
             ],
             config: {
@@ -1022,6 +995,7 @@ Trình bày ngắn gọn (<260 từ), nêu rõ: [Loài cây], [Giả thuyết ba
         } catch (groundingErr: any) {
           if (isPermissionOrBillingError(groundingErr)) {
             permissionOrBillingFailure = true;
+            lastError = groundingErr;
             console.error('[AgriVision AI] Gemini API permission or billing error:', groundingErr?.message || groundingErr);
             break;
           }
@@ -1048,31 +1022,29 @@ Trình bày ngắn gọn (<260 từ), nêu rõ: [Loài cây], [Giả thuyết ba
       // Stage 1B: Multi-source expansion — if fewer than 2 distinct real sources were found and plant appears valid,
       // run a fast targeted Google Search pass specifically querying agricultural institutes & universities
       const distinctDomainsBefore1B = new Set(collectedSources.map((s) => s.domain.toLowerCase()));
-      const stage1bTimeout = getTimeoutMs(11000);
+      const remainingFor1B = requestDeadline - Date.now();
+      const stage1bTimeout = getTimeoutMs(5000);
       const looksLikeMismatchOrHealthy =
         /không phải cây|khác với|cây ổi|cây xoài|cây mít|cây chuối|khỏe mạnh|không phát hiện dấu hiệu bệnh/i.test(
           stage1ReportText
         );
-      const hasPesticideEvidence = /hoạt chất|thuốc|chế phẩm|booc-đô|đồng|tricyclazole|azoxystrobin|abamectin|trichoderma|validamycin|difenoconazole|mancozeb|imidacloprid/i.test(
-        stage1ReportText
-      );
       if (
         !permissionOrBillingFailure &&
         !googleSearchQuotaExceeded &&
         !looksLikeMismatchOrHealthy &&
-        (distinctDomainsBefore1B.size < 2 || !hasPesticideEvidence) &&
+        distinctDomainsBefore1B.size < 2 &&
         stage1ReportText.length > 25 &&
-        stage1bTimeout >= 5000
+        remainingFor1B >= 13500 &&
+        stage1bTimeout >= 4000
       ) {
         const searchModel = stage1ModelUsed || CANDIDATE_MODELS[0];
         try {
           const verifySearchResp = await ai.models.generateContent({
             model: searchModel,
-            contents: `Hãy gọi công cụ Google Search để truy xuất THÊM nguồn chính thống từ Cục Bảo vệ Thực vật, Viện Bảo vệ Thực vật, Trung tâm Khuyến nông Quốc gia, Học viện Nông nghiệp, Đại học Cần Thơ nhằm kiểm chứng chéo:
-1) Triệu chứng và cách phân biệt các bệnh trên ${cropNameVi}${hasSpecificPart ? ` (${partNameVi})` : ''} trong báo cáo sau: "${stage1ReportText.slice(0, 650)}"
-2) Danh mục **hoạt chất và thuốc bảo vệ thực vật được phép lưu hành tại Việt Nam** (tên hoạt chất chuẩn, chế phẩm sinh học hoặc thuốc thương phẩm phổ biến) được khuyến cáo để phun trị bệnh chính xác cho trường hợp này.
+            contents: `Hãy gọi công cụ Google Search để truy xuất THÊM ít nhất 2 nguồn độc lập từ cơ quan nông nghiệp, viện nghiên cứu hoặc trường đại học (như Cục Bảo vệ Thực vật, Viện Bảo vệ Thực vật, Trung tâm Khuyến nông Quốc gia, Học viện Nông nghiệp, Đại học Cần Thơ) nhằm kiểm chứng chéo triệu chứng, nguyên nhân và cách phân biệt các bệnh trên ${cropNameVi} (${partNameVi}) trong báo cáo sau:
+"${stage1ReportText.slice(0, 750)}"
 
-Tóm tắt trong 4-6 câu: những điểm tài liệu thống nhất và danh sách tên hoạt chất/thuốc BVTV phù hợp nhất được ghi nhận từ Google Search.`,
+Tóm tắt trong 3-5 câu thuần tiếng Việt: những điểm tài liệu thống nhất và điểm nào còn mâu thuẫn hoặc cần thận trọng phân biệt.`,
             config: {
               seed: 42,
               abortSignal: AbortSignal.timeout(stage1bTimeout),
@@ -1137,8 +1109,8 @@ Tóm tắt trong 4-6 câu: những điểm tài liệu thống nhất và danh s
           if (dailyCooldown > Date.now()) continue;
 
           for (let attempt = 0; attempt < 2; attempt++) {
-            const stage2Timeout = getTimeoutMs(verifierModel === 'gemini-4-hydrogen' ? 22000 : 18000);
-            if (stage2Timeout < 4500) break;
+            const stage2Timeout = getTimeoutMs(verifierModel === 'gemini-4-hydrogen' ? 14000 : 13000);
+            if (stage2Timeout < 4000) break;
 
             try {
               const verifierPrompt = `${userPrompt}
@@ -1172,8 +1144,7 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
    - cause (nguyên nhân), recognitionSigns (dấu hiệu nhận biết), favorableConditions (điều kiện thuận lợi).
    - immediate24hSteps (2-4 thao tác cụ thể làm trong 24 giờ đầu), careNext3To7Days (2-3 bước chăm sóc phục hồi 3-7 ngày tới), recoveryCheckSigns (2-3 dấu hiệu sau 5-7 ngày để biết bệnh đã khô "đứng vết" hay đang lan thêm).
    - mildVsSevereGuide: mildCase (mới chớm nhẹ vài lá/cây) và severeCase (bị nặng lan rộng — nói thẳng nếu bệnh nan y không chữa được cần chặt/nhổ bỏ tránh lãng phí tiền phun thuốc).
-   - suggestedActiveIngredients: 1-3 tên thuốc / nhóm hoạt chất phổ biến được phép lưu hành tại Việt Nam phù hợp đúng bệnh để bà con hỏi đại lý vật tư nông nghiệp (TUYỆT ĐỐI KHÔNG tự ghi liều lượng pha chế ml/g).
-   - suggestedPesticides: 1-4 mục thuốc / hoạt chất cụ thể ĐƯỢC ĐỐI CHIẾU TỪ BẰNG CHỨNG GOOGLE SEARCH ở Bước 1-2 và tài liệu Cục BVTV / Khuyến nông Việt Nam. Mỗi mục gồm: productOrIngredientName (tên thuốc/nhóm thuốc rõ ràng), activeIngredient (tên hoạt chất chuẩn như "Tricyclazole", "Azoxystrobin + Difenoconazole", "Copper Hydroxide", "Abamectin", "Trichoderma"...), category ("biological" | "chemical" | "mineral" | "none"), targetUse (công dụng cụ thể), sprayGuidance (thời điểm và kỹ thuật phun an toàn, nhắc đọc kỹ liều in trên nhãn), googleSearchQuery (cụm từ tìm kiếm Google tiếng Việt chuẩn xác để bà con bấm tìm ngay thuốc này, ví dụ: "thuốc trừ bệnh Tricyclazole trị đạo ôn lúa"). Nếu cây khỏe mạnh/ảnh mờ/lệch loài trả về [].
+   - suggestedActiveIngredients: 1-3 nhóm hoạt chất hoặc chế phẩm sinh học phổ biến được phép lưu hành tại Việt Nam phù hợp đúng bệnh để bà con hỏi đại lý vật tư nông nghiệp (TUYỆT ĐỐI KHÔNG tự ghi liều lượng pha chế ml/g).
    - doList (2-3 việc NÊN làm) và dontList (2-3 việc TUYỆT ĐỐI TRÁNH).
    - cultivationAndPrevention (biện pháp canh tác & phòng ngừa lâu dài), professionalHandling (hướng dẫn xử lý theo tài liệu chuyên môn), pesticideSafetyNote (nhắc Nguyên tắc 4 đúng: đúng thuốc, đúng lúc, đúng liều trên nhãn, đúng cách và hỏi cán bộ BVTV địa phương).`;
 
@@ -1186,11 +1157,7 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
                   abortSignal: AbortSignal.timeout(stage2Timeout),
                   thinkingConfig: {
                     thinkingLevel:
-                      verifierModel === 'gemini-3.1-flash-lite'
-                        ? attempt > 0
-                          ? ThinkingLevel.LOW
-                          : ThinkingLevel.MEDIUM
-                        : attempt > 0
+                      attempt > 0 || stage2Timeout < 16000
                         ? ThinkingLevel.LOW
                         : ThinkingLevel.MEDIUM,
                   },
@@ -1429,8 +1396,9 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
       }
 
       if (permissionOrBillingFailure) {
-        return res.status(503).json({
-          error: 'Dịch vụ phân tích ảnh tạm thời chưa được kích hoạt quyền truy cập trên máy chủ.',
+        return res.status(403).json({
+          error:
+            'Dự án Gemini API hiện chưa bật gói trả phí (Billing) hoặc khóa API chưa được cấp quyền truy cập. Vui lòng chọn khóa API có bật thanh toán trong Settings > Secrets.',
           details: lastError?.message || String(lastError || ''),
         });
       }
@@ -1452,15 +1420,17 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
         });
       }
 
-      let friendly502 = 'Không thể phân tích hình ảnh lúc này. Bác vui lòng thử lại sau ít phút.';
+      let friendlyError = 'Không thể phân tích hình ảnh lúc này. Bác vui lòng thử lại sau ít phút.';
+      let statusCode = 500;
       if (errLower.includes('api key not valid') || errLower.includes('api_key_invalid') || errLower.includes('invalid api key')) {
-        friendly502 = 'Khóa kết nối trên máy chủ không hợp lệ. Vui lòng kiểm tra lại cấu hình hệ thống.';
+        friendlyError = 'Khóa API Gemini trên máy chủ không hợp lệ. Vui lòng kiểm tra lại trong Settings > Secrets.';
+        statusCode = 400;
       } else if (errLower.includes('not found') || errLower.includes('not_found') || errLower.includes('is not supported')) {
-        friendly502 = 'Dịch vụ phân tích hiện chưa khả dụng với cấu hình máy chủ hiện tại.';
+        friendlyError = 'Dịch vụ phân tích hiện chưa khả dụng với cấu hình máy chủ hiện tại.';
       }
 
-      return res.status(502).json({
-        error: friendly502,
+      return res.status(statusCode).json({
+        error: friendlyError,
         details: rawErrMsg,
       });
     } catch (error: any) {
@@ -1472,7 +1442,7 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
     }
   });
 
-  // 2. Agricultural AI Assistant Chat Endpoint (with Google Search Grounding for accurate pesticide guidance)
+  // 2. Agricultural AI Assistant Chat Endpoint
   app.post('/api/assistant', async (req: Request, res: Response) => {
     try {
       const { message, history = [], diagnosisContext } = req.body || {};
@@ -1488,17 +1458,14 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
       );
 
       const systemInstruction = `
-Bạn là Bác sĩ Cây trồng chuyên sâu về cây trồng vùng Bắc Trung Bộ (Cây Cam Bưởi, Cây Lúa, Cây Lạc) với kho dữ liệu ${DEFAULT_DISEASES.length} bệnh, sâu hại và thiếu dinh dưỡng đã kiểm chứng, kết hợp tra cứu Google Search trực tiếp theo tài liệu Cục Bảo vệ Thực vật và Khuyến nông Việt Nam.
+Bạn là Bác sĩ Cây trồng chuyên sâu về cây trồng vùng Bắc Trung Bộ (Cây Cam Bưởi, Cây Lúa, Cây Lạc) với kho dữ liệu ${DEFAULT_DISEASES.length} bệnh, sâu hại và thiếu dinh dưỡng đã kiểm chứng.
 Mục tiêu của bạn là đồng hành cùng bà con nông dân, giải đáp thắc mắc rõ ràng, mộc mạc, dễ hiểu và chuẩn xác.
 
 NGUYÊN TẮC BẮT BUỘC:
-1. TRẢ LỜI BẰNG TIẾNG VIỆT DỄ HIỂU: Giải thích mộc mạc cho bà con nông dân. Khi bà con hỏi về **thuốc phun, thuốc đặc trị hoặc hoạt chất**, BẮT BUỘC gọi công cụ Google Search để kiểm chứng đúng tên hoạt chất và thuốc bảo vệ thực vật được phép lưu hành tại Việt Nam cho đúng bệnh và đúng cây trồng (có thể giữ nguyên tên hoạt chất quốc tế chuẩn như Tricyclazole, Azoxystrobin, Difenoconazole, Copper Hydroxide, Abamectin, Validamycin, Trichoderma... để bà con ra đại lý mua cho đúng).
+1. TRẢ LỜI 100% THUẦN TIẾNG VIỆT: Tuyệt đối không chèn từ tiếng Anh, không mở ngoặc tên tiếng Anh hay tên khoa học Latinh, không dùng từ viết tắt tiếng Anh.
 2. Phân biệt rõ thông tin đã xác thực từ tài liệu nông nghiệp và gợi ý cần kiểm tra thêm ngoài vườn.
-3. Không tự ý bịa liều lượng pha hóa chất độc hại; luôn nhắc Nguyên tắc 4 đúng và đọc kỹ liều lượng trên nhãn bao bì.
+3. Không tự ý kê đơn hóa chất độc hại hoặc nồng độ tùy tiện; luôn ưu tiên biện pháp phòng trừ tổng hợp an toàn.
 4. Nếu người dùng đang hỏi về một lần khám bệnh gần nhất, hãy giải thích dựa đúng trên ngữ cảnh đó.
-5. Nếu trong câu trả lời có gợi ý tên thuốc hoặc hoạt chất cụ thể để phun/trị, ở dòng cuối cùng hãy thêm đúng 1 thẻ định dạng:
-   [GOI_Y_THUOC: Tên thuốc hoặc hoạt chất 1 | Tên thuốc hoặc hoạt chất 2]
-   (tối đa 4 mục, ngăn cách bởi dấu |). Nếu câu hỏi không liên quan đến thuốc thì không cần thêm thẻ này.
 
 CƠ SỞ DỮ LIỆU ĐÃ KIỂM CHỨNG LIÊN QUAN:
 ${assistantKnowledge}
@@ -1508,7 +1475,8 @@ ${assistantKnowledge}
       if (diagnosisContext) {
         contextPrompt = `
 [Ngữ cảnh chẩn đoán hiện tại]:
-- Cây trồng: ${diagnosisContext.crop}${diagnosisContext.part ? `\n- Bộ phận: ${diagnosisContext.part}` : ''}
+- Cây trồng: ${diagnosisContext.crop}
+- Bộ phận: ${diagnosisContext.part || 'Lá'}
 - Bệnh nghi ngờ: ${diagnosisContext.suspectedDisease || 'Chưa xác định'}
 - Triệu chứng ghi nhận: ${JSON.stringify(diagnosisContext.symptoms || [])}
 - Mức độ tin cậy: ${diagnosisContext.confidenceLevel || 'Trung bình'}
@@ -1525,7 +1493,6 @@ ${assistantKnowledge}
       const fullPrompt = `${contextPrompt}${conversationPrompt ? conversationPrompt + '\n' : ''}Người dùng: ${message}\nTrợ lý:`;
 
       let replyText = '';
-      const assistantSources: { title: string; url: string; domain?: string; sourceCategory?: string }[] = [];
 
       const ai = getGeminiClient();
       if (ai) {
@@ -1539,37 +1506,14 @@ ${assistantKnowledge}
               contents: fullPrompt,
               config: {
                 systemInstruction,
-                abortSignal: AbortSignal.timeout(15000),
+                abortSignal: AbortSignal.timeout(10000),
                 thinkingConfig: {
                   thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
                 },
-                tools: [{ googleSearch: {} }],
               },
             });
             if (response.text) {
               replyText = response.text;
-              const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-              if (Array.isArray(chunks)) {
-                for (const chunk of chunks) {
-                  const uri = chunk?.web?.uri;
-                  const title = String(chunk?.web?.title || uri || '').trim();
-                  if (typeof uri === 'string' && (uri.startsWith('http://') || uri.startsWith('https://'))) {
-                    if (!assistantSources.some((s) => s.url === uri)) {
-                      let domain = '';
-                      try {
-                        domain = new URL(uri).hostname.replace(/^www\./, '');
-                      } catch {
-                        domain = title;
-                      }
-                      assistantSources.push({
-                        title: title || domain,
-                        url: uri,
-                        domain: domain.includes('vertexaisearch.cloud.google.com') ? title : domain,
-                      });
-                    }
-                  }
-                }
-              }
               break;
             }
           } catch (apiErr: any) {
@@ -1590,44 +1534,7 @@ ${assistantKnowledge}
         replyText = searchRegionalKnowledge(message, diagnosisContext?.crop);
       }
 
-      // Extract [GOI_Y_THUOC: ...] tag + known medicine patterns
-      const parsedMedicines: { name: string; searchQuery: string }[] = [];
-      const tagMatch = replyText.match(/\[GOI_Y_THUOC:\s*([^\]]+)\]/i);
-      if (tagMatch) {
-        const rawList = tagMatch[1]
-          .split('|')
-          .map((s) => s.trim())
-          .filter((s) => s.length >= 2);
-        for (const med of rawList.slice(0, 4)) {
-          if (!parsedMedicines.some((m) => m.name.toLowerCase() === med.toLowerCase())) {
-            const cropHint = diagnosisContext?.crop ? ` ${diagnosisContext.crop}` : '';
-            const diseaseHint = diagnosisContext?.suspectedDisease ? ` ${diagnosisContext.suspectedDisease}` : '';
-            parsedMedicines.push({
-              name: med,
-              searchQuery: `thuốc bảo vệ thực vật ${med}${diseaseHint}${cropHint} cách dùng`.replace(/\s+/g, ' ').trim(),
-            });
-          }
-        }
-        replyText = replyText.replace(/\[GOI_Y_THUOC:\s*[^\]]+\]/gi, '').trim();
-      }
-
-      if (parsedMedicines.length === 0) {
-        const detected = extractMedicinesFromText(replyText);
-        for (const med of detected.slice(0, 4)) {
-          const cropHint = diagnosisContext?.crop ? ` ${diagnosisContext.crop}` : '';
-          const diseaseHint = diagnosisContext?.suspectedDisease ? ` ${diagnosisContext.suspectedDisease}` : '';
-          parsedMedicines.push({
-            name: med,
-            searchQuery: `${med}${diseaseHint}${cropHint} cách dùng`.replace(/\s+/g, ' ').trim(),
-          });
-        }
-      }
-
-      return res.json({
-        reply: cleanVietnameseText(replyText),
-        suggestedMedicines: parsedMedicines,
-        sources: assistantSources.slice(0, 4),
-      });
+      return res.json({ reply: cleanVietnameseText(replyText) });
     } catch (error: any) {
       console.error('Error during AI assistant response:', error);
       return res.status(500).json({
@@ -1662,7 +1569,7 @@ ${assistantKnowledge}
 
       const ai = getGeminiClient();
       if (!ai) {
-        return res.status(503).json({
+        return res.status(500).json({
           error: 'Dịch vụ giọng đọc AI chưa sẵn sàng trên máy chủ.',
         });
       }
@@ -1695,7 +1602,7 @@ ${assistantKnowledge}
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (!base64Audio) {
-        return res.status(502).json({ error: 'Không tạo được âm thanh giọng đọc lúc này.' });
+        return res.status(500).json({ error: 'Không tạo được âm thanh giọng đọc lúc này.' });
       }
 
       return res.json({
@@ -1703,6 +1610,12 @@ ${assistantKnowledge}
         mimeType: 'audio/wav',
       });
     } catch (error: any) {
+      if (isPermissionOrBillingError(error)) {
+        return res.status(403).json({
+          error: 'Giọng đọc AI chưa được kích hoạt thanh toán (Billing) trên dự án Gemini API.',
+          details: error?.message || String(error),
+        });
+      }
       const errMsg = String(error?.message || error || '').toLowerCase();
       const isQuotaExceeded =
         error?.code === 429 ||
@@ -1718,7 +1631,7 @@ ${assistantKnowledge}
         });
       }
       console.error('[AgriVision AI] TTS error:', error?.message || error);
-      return res.status(502).json({
+      return res.status(500).json({
         error: 'Không thể tạo giọng đọc lúc này.',
         details: error?.message || String(error),
       });

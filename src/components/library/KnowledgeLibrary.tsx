@@ -19,17 +19,11 @@ import {
   Ban,
   AlertTriangle,
   ExternalLink,
-  Sprout,
 } from 'lucide-react';
 import { DiseaseRecord, CropType, GalleryImage } from '../../types';
 import { fetchDiseases, saveDisease, deleteDisease, syncVerifiedDiseases } from '../../services/diseaseService';
 import { useAuth } from '../../context/AuthContext';
 import { cleanVietnameseText } from '../../utils/vietnameseText';
-import {
-  buildGoogleMedicineSearchUrl,
-  buildRawGoogleSearchUrl,
-  extractMedicinesFromText,
-} from '../../utils/googleMedicineSearch';
 
 interface KnowledgeLibraryProps {
   initialCrop?: CropType;
@@ -959,67 +953,6 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                         </ul>
                       </div>
                     )}
-
-                    {/* Tra cứu thuốc / chế phẩm gợi ý ngay trên Google */}
-                    {(() => {
-                      const medSourceText = [
-                        selectedDisease.safeManagement,
-                        ...(selectedDisease.treatmentSteps?.immediate || []),
-                        ...(selectedDisease.treatmentSteps?.biologicalAndCare || []),
-                      ].join(' ');
-                      const extractedMeds = extractMedicinesFromText(medSourceText);
-                      const cleanDiseaseName = cleanVietnameseText(selectedDisease.vietnameseName);
-                      const cropLabel = getCropInfo(selectedDisease.cropType).label;
-                      return (
-                        <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
-                          <p className="font-bold text-stone-900 flex items-center gap-2 text-base">
-                            <Sprout className="w-4 h-4 text-emerald-700 shrink-0" />
-                            <span>Thuốc &amp; Chế phẩm gợi ý (Tìm nhanh trên Google)</span>
-                          </p>
-                          {extractedMeds.length > 0 && (
-                            <div className="space-y-2">
-                              {extractedMeds.map((medName, idx) => (
-                                <div
-                                  key={idx}
-                                  className="rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
-                                >
-                                  <span className="text-sm sm:text-base font-semibold text-stone-900">
-                                    {medName}
-                                  </span>
-                                  <a
-                                    href={buildGoogleMedicineSearchUrl(medName, cleanDiseaseName, cropLabel)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center justify-center gap-1.5 min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold whitespace-nowrap shrink-0 transition-colors"
-                                  >
-                                    <Search className="w-3.5 h-3.5 shrink-0" />
-                                    <span>Tìm thuốc trên Google</span>
-                                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                                  </a>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1">
-                            <p className="text-xs sm:text-sm text-stone-600">
-                              Bấm tìm trực tiếp danh mục thuốc được phép lưu hành cho {cropLabel} trên Google để xem nhãn chai và hướng dẫn pha chuẩn.
-                            </p>
-                            <a
-                              href={buildRawGoogleSearchUrl(
-                                `thuốc bảo vệ thực vật đặc trị ${cleanDiseaseName} ${cropLabel} Cục Bảo vệ thực vật`
-                              )}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex items-center justify-center gap-1.5 min-h-[40px] px-4 py-2 rounded-xl bg-white hover:bg-emerald-50 text-emerald-900 border border-emerald-300 text-xs sm:text-sm font-bold whitespace-nowrap shrink-0 transition-colors"
-                            >
-                              <Search className="w-3.5 h-3.5 shrink-0 text-emerald-700" />
-                              <span>Tìm thuốc trị bệnh này trên Google</span>
-                              <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                            </a>
-                          </div>
-                        </div>
-                      );
-                    })()}
 
                     {/* Nguyên tắc 4 đúng */}
                     <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 space-y-1.5 text-sm text-amber-950">

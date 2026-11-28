@@ -5,12 +5,8 @@ import {
   User,
   RefreshCw,
   X,
-  Search,
-  ExternalLink,
-  Globe,
 } from 'lucide-react';
 import { ChatMessage } from '../../types';
-import { buildRawGoogleSearchUrl } from '../../utils/googleMedicineSearch';
 
 interface AgriculturalAssistantProps {
   initialContext?: {
@@ -53,11 +49,8 @@ export const AgriculturalAssistant: React.FC<AgriculturalAssistantProps> = ({
   }, [messages, loading]);
 
   const quickQuestions = [
-    ...(activeContext?.suspectedDisease
-      ? [`${activeContext.suspectedDisease} nên dùng thuốc gì phun hiệu quả?`]
-      : []),
-    'Lúa bị đạo ôn thì phun thuốc gì?',
-    'Cây cam bị loét lá dùng thuốc nào?',
+    'Lúa bị đạo ôn thì chữa thế nào?',
+    'Cây cam bị vàng lá làm sao cứu?',
     'Cách phòng bệnh đốm lá cây lạc?',
     'Chụp ảnh lá cây sao cho rõ nét?',
   ];
@@ -108,8 +101,6 @@ export const AgriculturalAssistant: React.FC<AgriculturalAssistantProps> = ({
           sender: 'assistant',
           content: data.reply || 'Bác hỏi rõ hơn một chút để tôi trả lời chính xác nhé.',
           timestamp: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
-          suggestedMedicines: Array.isArray(data.suggestedMedicines) ? data.suggestedMedicines : undefined,
-          sources: Array.isArray(data.sources) ? data.sources : undefined,
         },
       ]);
     } catch {
@@ -183,50 +174,6 @@ export const AgriculturalAssistant: React.FC<AgriculturalAssistantProps> = ({
                   }`}
                 >
                   <div>{msg.content}</div>
-                  {isBot && msg.suggestedMedicines && msg.suggestedMedicines.length > 0 && (
-                    <div className="mt-3 pt-3 border-t border-stone-200 space-y-2">
-                      <p className="text-xs font-bold text-stone-700">
-                        Bấm để tìm nhanh thông tin &amp; nhãn thuốc trên Google:
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {msg.suggestedMedicines.map((med, mIdx) => (
-                          <a
-                            key={`${med.name}-${mIdx}`}
-                            href={buildRawGoogleSearchUrl(med.searchQuery)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1.5 min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold transition-colors"
-                          >
-                            <Search className="w-3.5 h-3.5 shrink-0" />
-                            <span>Tìm {med.name} trên Google</span>
-                            <ExternalLink className="w-3 h-3 shrink-0" />
-                          </a>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {isBot && msg.sources && msg.sources.length > 0 && (
-                    <div className="mt-2.5 pt-2 border-t border-stone-200/80 space-y-1">
-                      <p className="text-[11px] font-semibold text-stone-500 flex items-center gap-1">
-                        <Globe className="w-3 h-3" />
-                        <span>Nguồn đối chiếu Google:</span>
-                      </p>
-                      <div className="flex flex-wrap gap-x-3 gap-y-1">
-                        {msg.sources.map((src, sIdx) => (
-                          <a
-                            key={`${src.url}-${sIdx}`}
-                            href={src.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-xs text-emerald-800 hover:underline inline-flex items-center gap-1"
-                          >
-                            <span className="truncate max-w-[200px]">{src.title || src.domain}</span>
-                            <ExternalLink className="w-3 h-3 shrink-0" />
-                          </a>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                   <div className={`mt-2 text-xs text-right ${isBot ? 'text-stone-500' : 'text-emerald-100'}`}>
                     {msg.timestamp}
                   </div>

@@ -16,7 +16,7 @@ import { sanitizeDiagnosisResultToVietnamese } from '../utils/vietnameseText';
 
 const COLLECTION_NAME = 'diagnoses';
 const LOCAL_STORAGE_KEY = 'agrivision_local_diagnoses';
-const DIAGNOSIS_CACHE_KEY = 'agrivision_diag_cache_v10';
+const DIAGNOSIS_CACHE_KEY = 'agrivision_diag_cache_v9';
 
 export interface ScanTrustSummary {
   totalSuccessfulScans: number;
@@ -61,7 +61,7 @@ async function computeDiagnosisCacheKey(
   const extrasKey = Array.isArray(extraImages)
     ? extraImages.map((e) => `${e.angleLabel || ''}:${e.imageBase64}`).join('|')
     : '';
-  const payload = `v10|${cropType}|${plantPart}|${normalizedQuiz}|${imageBase64}|${extrasKey}`;
+  const payload = `v9|${cropType}|${plantPart}|${normalizedQuiz}|${imageBase64}|${extrasKey}`;
 
   try {
     if (typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined') {
@@ -128,7 +128,7 @@ export interface ExtraAngleImageInput {
 export async function runServerDiagnosis(
   imageBase64: string,
   cropType: CropType,
-  plantPart: PlantPart = 'other',
+  plantPart: PlantPart,
   mimeType: string = 'image/jpeg',
   visualMetrics?: {
     healthyGreenRatio: number;
@@ -160,23 +160,63 @@ export async function runServerDiagnosis(
     return cachedResult;
   }
 
-  const response = await fetch('/api/diagnose', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      imageBase64,
-      mimeType,
-      cropType,
-      plantPart,
-      visualMetrics,
-      extraImages,
-      quizAnswers,
-    }),
+  const requestBody = JSON.stringify({
+    imageBase64,
+    mimeType,
+    cropType,
+    plantPart,
+    visualMetrics,
+    extraImages,
+    quizAnswers,
   });
 
-  const rawText = await response.text();
+  let response: Response | null = null;
+  let rawText = '';
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 32000);
+    try {
+      response = await fetch('/api/diagnose', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: requestBody,
+        signal: controller.signal,
+      });
+      rawText = await response.text();
+    } catch (fetchErr: any) {
+      clearTimeout(timeoutId);
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
+      if (fetchErr?.name === 'AbortError') {
+        throw new Error('Máy chủ phân tích phản hồi quá lâu. Bác vui lòng thử lại với một ảnh rõ nét nhé.');
+      }
+      throw new Error('Không thể kết nối tới máy chủ phân tích. Bác vui lòng kiểm tra mạng và thử lại nhé.');
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const trimmed = rawText.trim();
+    const isTransientGateway =
+      (response.status === 502 || response.status === 503) &&
+      (!trimmed || trimmed.startsWith('<') || !contentType.includes('application/json'));
+
+    if (isTransientGateway && attempt === 0) {
+      await new Promise((r) => setTimeout(r, 1200));
+      continue;
+    }
+    break;
+  }
+
+  if (!response) {
+    throw new Error('Không thể kết nối tới máy chủ phân tích. Bác vui lòng thử lại nhé.');
+  }
+
   const contentType = response.headers.get('content-type') || '';
   const trimmed = rawText.trim();
 
@@ -214,7 +254,7 @@ export async function runServerDiagnosis(
       );
     }
     throw new Error(
-      `Máy chủ phân tích đang bận hoặc kết nối tạm gián đoạn. Bác vui lòng bấm thử lại sau vài giây nhé.`
+      'Máy chủ phân tích đang bận hoặc kết nối tạm gián đoạn. Bác vui lòng bấm thử lại sau vài giây nhé.'
     );
   }
 
