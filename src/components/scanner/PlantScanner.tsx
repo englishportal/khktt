@@ -10,7 +10,7 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { CropType, PlantPart, DiagnosisResult, FieldQuizAnswers } from '../../types';
+import { CropType, DiagnosisResult, FieldQuizAnswers } from '../../types';
 import { runServerDiagnosis, saveDiagnosisRecord, fetchDiagnosisAudio } from '../../services/diagnosisService';
 import { useAuth } from '../../context/AuthContext';
 import { resolveSupportedCropType } from '../../utils/vietnameseText';
@@ -30,7 +30,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
   const { user } = useAuth();
 
   const [selectedCrop, setSelectedCrop] = useState<CropType>(initialCrop);
-  const [selectedPart, setSelectedPart] = useState<PlantPart>('leaf');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [mimeType, setMimeType] = useState<string>('image/jpeg');
 
@@ -91,18 +90,8 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
     { id: 'peanut', label: 'Cây Lạc (Đậu)', icon: '🥜' },
   ];
 
-  const partOptions: { id: PlantPart; label: string }[] = [
-    { id: 'leaf', label: 'Lá cây' },
-    { id: 'stem', label: 'Thân / Cành' },
-    { id: 'fruit', label: 'Quả / Củ' },
-    { id: 'other', label: 'Toàn cây' },
-  ];
-
   const getCropLabel = (crop: CropType) =>
     crop === 'citrus' ? 'Cây Cam, Bưởi' : crop === 'rice' ? 'Cây Lúa' : 'Cây Lạc';
-
-  const getPartLabel = (part: PlantPart) =>
-    partOptions.find((p) => p.id === part)?.label || 'Lá cây';
 
   const compressImageDataUrl = (dataUrl: string, maxDim = 1280, quality = 0.86): Promise<string> => {
     return new Promise((resolve) => {
@@ -629,7 +618,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
       const diagnosisResult = await runServerDiagnosis(
         imagePreview,
         selectedCrop,
-        selectedPart,
+        'other',
         mimeType,
         visualMetrics,
         validExtras,
@@ -645,7 +634,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
         userId: user?.uid || 'guest_user',
         userEmail: user?.email || '',
         cropType: selectedCrop,
-        plantPart: selectedPart,
+        plantPart: 'other',
         imageUrl: imagePreview,
         assessment: diagnosisResult,
         suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
@@ -691,7 +680,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
       const diagnosisResult = await runServerDiagnosis(
         imagePreview,
         newCrop,
-        selectedPart,
+        'other',
         mimeType,
         visualMetrics,
         validExtras,
@@ -703,7 +692,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
         userId: user?.uid || 'guest_user',
         userEmail: user?.email || '',
         cropType: newCrop,
-        plantPart: selectedPart,
+        plantPart: 'other',
         imageUrl: imagePreview,
         assessment: diagnosisResult,
         suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
@@ -742,21 +731,18 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
   const quickSamples = [
     {
       crop: 'citrus' as CropType,
-      part: 'leaf' as PlantPart,
       label: 'Mẫu lá Cam',
       url: '/images/citrus_leaf_hlb.jpg',
       icon: '🍊',
     },
     {
       crop: 'rice' as CropType,
-      part: 'leaf' as PlantPart,
       label: 'Mẫu lá Lúa',
       url: '/images/rice_leaf_blast.jpg',
       icon: '🌾',
     },
     {
       crop: 'peanut' as CropType,
-      part: 'leaf' as PlantPart,
       label: 'Mẫu lá Lạc',
       url: '/images/peanut_leaf_spot.jpg',
       icon: '🥜',
@@ -829,25 +815,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
               </button>
             );
           })}
-        </div>
-
-        {/* Unobtrusive 1-row part selector */}
-        <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-stone-600 mr-1">Chụp bộ phận:</span>
-          {partOptions.map((part) => (
-            <button
-              key={part.id}
-              type="button"
-              onClick={() => setSelectedPart(part.id)}
-              className={`px-3.5 py-2 rounded-xl text-sm font-semibold min-h-[40px] transition-colors cursor-pointer ${
-                selectedPart === part.id
-                  ? 'bg-emerald-700 text-white'
-                  : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-              }`}
-            >
-              {part.label}
-            </button>
-          ))}
         </div>
       </section>
 
@@ -1187,7 +1154,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
                     type="button"
                     onClick={() => {
                       setSelectedCrop(sample.crop);
-                      setSelectedPart(sample.part);
                       setImagePreview(sample.url);
                       setSourceSampleCrop(sample.crop);
                       setImageFileName(`${sample.crop}_sample.jpg`);
@@ -1381,7 +1347,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
                         Cây khỏe mạnh, không có bệnh!
                       </h2>
                       <p className="text-base text-stone-600">
-                        Cây đang kiểm tra: <strong>{getCropLabel(selectedCrop)}</strong> ({getPartLabel(selectedPart)})
+                        Cây đang kiểm tra: <strong>{getCropLabel(selectedCrop)}</strong>
                       </p>
                     </div>
                   </div>
@@ -1419,7 +1385,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
               <DiagnosisReportView
                 result={result}
                 selectedCrop={selectedCrop}
-                selectedPart={selectedPart}
                 imagePreview={imagePreview}
                 extraImages={activeExtraPreviews}
                 isSaved={isSaved}

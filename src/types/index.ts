@@ -96,6 +96,15 @@ export interface ReliabilityAssessment {
   lowConfidenceAction?: string;
 }
 
+export interface SuggestedPesticide {
+  productOrIngredientName: string;
+  activeIngredient: string;
+  category: 'biological' | 'chemical' | 'mineral' | 'none';
+  targetUse: string;
+  sprayGuidance: string;
+  googleSearchQuery: string;
+}
+
 export interface TreatmentGuide {
   cause: string;
   recognitionSigns: string[];
@@ -110,6 +119,7 @@ export interface TreatmentGuide {
     severeCase: string;
   };
   suggestedActiveIngredients?: string[];
+  suggestedPesticides?: SuggestedPesticide[];
   doList?: string[];
   dontList?: string[];
   recoveryCheckSigns?: string[];
@@ -235,11 +245,19 @@ export interface EvaluationMetrics {
   };
 }
 
+export interface AssistantMedicineSuggestion {
+  name: string;
+  activeIngredient?: string;
+  searchQuery: string;
+}
+
 export interface ChatMessage {
   id: string;
   sender: 'user' | 'assistant';
   content: string;
   timestamp: string;
+  suggestedMedicines?: AssistantMedicineSuggestion[];
+  sources?: GroundingSource[];
   contextDiagnosis?: {
     crop: string;
     suspectedDisease: string;

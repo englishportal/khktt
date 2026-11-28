@@ -16,7 +16,7 @@ import { sanitizeDiagnosisResultToVietnamese } from '../utils/vietnameseText';
 
 const COLLECTION_NAME = 'diagnoses';
 const LOCAL_STORAGE_KEY = 'agrivision_local_diagnoses';
-const DIAGNOSIS_CACHE_KEY = 'agrivision_diag_cache_v9';
+const DIAGNOSIS_CACHE_KEY = 'agrivision_diag_cache_v10';
 
 export interface ScanTrustSummary {
   totalSuccessfulScans: number;
@@ -61,7 +61,7 @@ async function computeDiagnosisCacheKey(
   const extrasKey = Array.isArray(extraImages)
     ? extraImages.map((e) => `${e.angleLabel || ''}:${e.imageBase64}`).join('|')
     : '';
-  const payload = `v9|${cropType}|${plantPart}|${normalizedQuiz}|${imageBase64}|${extrasKey}`;
+  const payload = `v10|${cropType}|${plantPart}|${normalizedQuiz}|${imageBase64}|${extrasKey}`;
 
   try {
     if (typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined') {
@@ -128,7 +128,7 @@ export interface ExtraAngleImageInput {
 export async function runServerDiagnosis(
   imageBase64: string,
   cropType: CropType,
-  plantPart: PlantPart,
+  plantPart: PlantPart = 'other',
   mimeType: string = 'image/jpeg',
   visualMetrics?: {
     healthyGreenRatio: number;

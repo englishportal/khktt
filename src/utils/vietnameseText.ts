@@ -294,7 +294,25 @@ export function sanitizeDiagnosisResultToVietnamese(result: any, fallbackCrop?: 
                 severeCase: cleanVietnameseText(String(result.treatmentGuide.mildVsSevereGuide.severeCase || '')),
               }
             : undefined,
-          suggestedActiveIngredients: cleanArray(result.treatmentGuide.suggestedActiveIngredients),
+          suggestedActiveIngredients: Array.isArray(result.treatmentGuide.suggestedActiveIngredients)
+            ? result.treatmentGuide.suggestedActiveIngredients
+                .map((item: any) => String(item || '').trim())
+                .filter((item: string) => item.length > 0)
+            : [],
+          suggestedPesticides: Array.isArray(result.treatmentGuide.suggestedPesticides)
+            ? result.treatmentGuide.suggestedPesticides
+                .filter((p: any) => p && typeof p === 'object' && String(p.productOrIngredientName || '').trim())
+                .map((p: any) => ({
+                  productOrIngredientName: String(p.productOrIngredientName || '').trim(),
+                  activeIngredient: String(p.activeIngredient || '').trim(),
+                  category: ['biological', 'chemical', 'mineral', 'none'].includes(p.category)
+                    ? p.category
+                    : 'chemical',
+                  targetUse: cleanVietnameseText(String(p.targetUse || '')),
+                  sprayGuidance: cleanVietnameseText(String(p.sprayGuidance || '')),
+                  googleSearchQuery: String(p.googleSearchQuery || p.productOrIngredientName || '').trim(),
+                }))
+            : undefined,
           doList: cleanArray(result.treatmentGuide.doList),
           dontList: cleanArray(result.treatmentGuide.dontList),
           recoveryCheckSigns: cleanArray(result.treatmentGuide.recoveryCheckSigns),

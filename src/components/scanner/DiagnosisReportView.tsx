@@ -15,6 +15,7 @@ import {
   MessageCircle,
   RefreshCw,
   Scale,
+  Search,
   ShieldAlert,
   ShieldCheck,
   Sprout,
@@ -24,6 +25,10 @@ import {
 import { CropType, DiagnosisResult, PlantPart } from '../../types';
 import { DEFAULT_DISEASES } from '../../data/defaultDiseases';
 import { cleanVietnameseText, stripEnglishParentheticals } from '../../utils/vietnameseText';
+import {
+  buildGoogleMedicineSearchUrl,
+  buildRawGoogleSearchUrl,
+} from '../../utils/googleMedicineSearch';
 
 interface ExtraAnglePreview {
   imageBase64: string;
@@ -33,7 +38,7 @@ interface ExtraAnglePreview {
 interface DiagnosisReportViewProps {
   result: DiagnosisResult;
   selectedCrop: CropType;
-  selectedPart: PlantPart;
+  selectedPart?: PlantPart;
   imagePreview: string | null;
   extraImages?: ExtraAnglePreview[];
   isSaved?: boolean;
@@ -51,7 +56,7 @@ interface DiagnosisReportViewProps {
 export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
   result,
   selectedCrop,
-  selectedPart,
+  selectedPart = 'other',
   imagePreview,
   extraImages = [],
   isSaved = false,
@@ -259,6 +264,11 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
       result.treatmentGuide.suggestedActiveIngredients.length > 0
         ? result.treatmentGuide.suggestedActiveIngredients
         : [],
+    suggestedPesticides:
+      result.treatmentGuide?.suggestedPesticides &&
+      result.treatmentGuide.suggestedPesticides.length > 0
+        ? result.treatmentGuide.suggestedPesticides
+        : [],
     doList:
       result.treatmentGuide?.doList && result.treatmentGuide.doList.length > 0
         ? result.treatmentGuide.doList
@@ -340,8 +350,12 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
             )}
             <div className="text-xs text-stone-600 flex flex-wrap items-center gap-x-2 gap-y-1">
               <span>{getCropLabel(selectedCrop)}</span>
-              <span aria-hidden="true">·</span>
-              <span>{getPartLabel(selectedPart)}</span>
+              {selectedPart && selectedPart !== 'other' && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>{getPartLabel(selectedPart)}</span>
+                </>
+              )}
               <span aria-hidden="true">·</span>
               <span>{getImageQualityLabel(result.imageQuality)}</span>
             </div>
@@ -966,21 +980,155 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
           </div>
         )}
 
-        {/* 3. Gợi ý nhóm hoạt chất / chế phẩm sinh học để hỏi đại lý vật tư (KHÔNG tự bịa liều pha) */}
-        {treatment.suggestedActiveIngredients.length > 0 && (
-          <div className="rounded-xl border border-stone-200 bg-white p-4 sm:p-5 space-y-2.5">
-            <p className="font-bold text-stone-900 text-base flex items-center gap-2">
-              <Sprout className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span>Gợi ý nhóm hoạt chất / chế phẩm sinh học để hỏi đại lý vật tư</span>
-            </p>
-            <ul className="list-disc list-inside space-y-1.5 text-sm sm:text-base text-stone-800 leading-relaxed">
-              {treatment.suggestedActiveIngredients.map((item, idx) => (
-                <li key={idx}>{item}</li>
-              ))}
-            </ul>
-            <p className="text-xs sm:text-sm text-stone-600 pt-2 border-t border-stone-100 leading-relaxed">
-              Bác có thể đưa tên nhóm hoạt chất hoặc chế phẩm trên để hỏi đại lý vật tư nông nghiệp uy tín hoặc cán bộ khuyến nông chọn đúng sản phẩm được phép lưu hành cho {getCropLabel(selectedCrop)}. Hệ thống không tự kê liều pha — bác pha đúng liều in trên nhãn bao bì.
-            </p>
+        {/* 3. Gợi ý thuốc & hoạt chất đối chiếu từ Google và Khuyến nông, kèm nút tìm thuốc ngay trên Google */}
+        {(treatment.suggestedPesticides.length > 0 ||
+          treatment.suggestedActiveIngredients.length > 0 ||
+          (result.isPlantImage !== false &&
+            result.selectedCropMatches !== false &&
+            primaryDiag?.diseaseId !== 'healthy' &&
+            primaryDiag?.diseaseId !== 'unclear_due_to_blur')) && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/30 p-4 sm:p-5 space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <p className="font-bold text-stone-900 text-base flex items-center gap-2">
+                <Sprout className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span>Thuốc phun &amp; Hoạt chất gợi ý (đối chiếu Google &amp; Khuyến nông)</span>
+              </p>
+              {realSources.length > 0 && (
+                <span className="text-xs font-semibold text-emerald-800">
+                  Đã kiểm chứng qua tìm kiếm Google
+                </span>
+              )}
+            </div>
+
+            {treatment.suggestedPesticides.length > 0 ? (
+              <div className="space-y-3">
+                {treatment.suggestedPesticides.map((med, idx) => {
+                  const categoryLabel =
+                    med.category === 'biological'
+                      ? 'Chế phẩm sinh học'
+                      : med.category === 'mineral'
+                      ? 'Gốc đồng / Dầu khoáng'
+                      : med.category === 'none'
+                      ? 'Không cần thuốc hóa học'
+                      : 'Thuốc đặc trị lưu hành';
+                  const categoryClass =
+                    med.category === 'biological'
+                      ? 'bg-emerald-100 text-emerald-900 border-emerald-200'
+                      : med.category === 'mineral'
+                      ? 'bg-stone-100 text-stone-800 border-stone-300'
+                      : med.category === 'none'
+                      ? 'bg-amber-100 text-amber-950 border-amber-200'
+                      : 'bg-sky-50 text-sky-900 border-sky-200';
+                  const searchHref = buildRawGoogleSearchUrl(
+                    med.googleSearchQuery ||
+                      `${med.productOrIngredientName} ${med.activeIngredient} trị ${primaryDiseaseName} ${getCropLabel(selectedCrop)} cách dùng`
+                  );
+
+                  return (
+                    <div
+                      key={`${med.productOrIngredientName}-${idx}`}
+                      className="rounded-xl border border-stone-200 bg-white p-4 space-y-2.5"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div className="space-y-1 min-w-0">
+                          <span
+                            className={`inline-block text-xs font-bold px-2.5 py-0.5 rounded-lg border ${categoryClass}`}
+                          >
+                            {categoryLabel}
+                          </span>
+                          <h4 className="text-base sm:text-lg font-bold text-stone-900 leading-snug">
+                            {med.productOrIngredientName}
+                          </h4>
+                          {med.activeIngredient &&
+                            med.activeIngredient.toLowerCase() !==
+                              med.productOrIngredientName.toLowerCase() && (
+                              <p className="text-xs sm:text-sm font-semibold text-emerald-900">
+                                Hoạt chất chính: {med.activeIngredient}
+                              </p>
+                            )}
+                        </div>
+
+                        {med.category !== 'none' && (
+                          <a
+                            href={searchHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-bold whitespace-nowrap shrink-0 transition-colors"
+                          >
+                            <Search className="w-4 h-4 shrink-0" />
+                            <span>Tìm thuốc trên Google</span>
+                            <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                          </a>
+                        )}
+                      </div>
+
+                      {med.targetUse && (
+                        <p className="text-sm text-stone-800 leading-relaxed">
+                          <strong className="text-stone-900">Công dụng: </strong>
+                          {med.targetUse}
+                        </p>
+                      )}
+                      {med.sprayGuidance && (
+                        <p className="text-sm text-stone-700 leading-relaxed bg-stone-50 rounded-lg px-3 py-2 border border-stone-100">
+                          <strong className="text-stone-900">Cách phun an toàn: </strong>
+                          {med.sprayGuidance}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : treatment.suggestedActiveIngredients.length > 0 ? (
+              <div className="space-y-2.5">
+                {treatment.suggestedActiveIngredients.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="rounded-xl border border-stone-200 bg-white p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  >
+                    <span className="text-sm sm:text-base font-semibold text-stone-900 leading-snug">
+                      {item}
+                    </span>
+                    <a
+                      href={buildGoogleMedicineSearchUrl(
+                        item,
+                        primaryDiseaseName,
+                        getCropLabel(selectedCrop)
+                      )}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-2 min-h-[42px] px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-bold whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      <Search className="w-4 h-4 shrink-0" />
+                      <span>Tìm thuốc trên Google</span>
+                      <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                    </a>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {result.isPlantImage !== false &&
+              result.selectedCropMatches !== false &&
+              primaryDiag?.diseaseId !== 'healthy' &&
+              primaryDiag?.diseaseId !== 'unclear_due_to_blur' && (
+                <div className="pt-2 border-t border-emerald-200/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <p className="text-xs sm:text-sm text-stone-700 leading-relaxed flex-1">
+                    Bác bấm nút bên cạnh từng tên thuốc để xem ngay hình ảnh chai thuốc, nhãn hướng dẫn và giá bán trên Google, rồi hỏi đại lý vật tư gần nhà chọn đúng sản phẩm lưu hành cho {getCropLabel(selectedCrop)}.
+                  </p>
+                  <a
+                    href={buildRawGoogleSearchUrl(
+                      `thuốc bảo vệ thực vật đặc trị ${primaryDiseaseName} ${getCropLabel(selectedCrop)} Cục Bảo vệ thực vật`
+                    )}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center justify-center gap-2 min-h-[42px] px-4 py-2 rounded-xl bg-white hover:bg-emerald-50 text-emerald-900 border border-emerald-300 text-sm font-bold whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    <Search className="w-4 h-4 shrink-0 text-emerald-700" />
+                    <span>Tìm thêm thuốc trên Google</span>
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                  </a>
+                </div>
+              )}
           </div>
         )}
 
@@ -1144,7 +1292,7 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
                 onClick={() =>
                   onNavigateToAssistant({
                     crop: result.cropDetected,
-                    part: getPartLabel(selectedPart),
+                    ...(selectedPart && selectedPart !== 'other' ? { part: getPartLabel(selectedPart) } : {}),
                     suspectedDisease: primaryDiseaseName,
                     symptoms: result.symptoms,
                     confidenceLevel: reliabilityMeta.label,
