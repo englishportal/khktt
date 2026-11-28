@@ -19,11 +19,17 @@ import {
   Ban,
   AlertTriangle,
   ExternalLink,
+  Sprout,
 } from 'lucide-react';
 import { DiseaseRecord, CropType, GalleryImage } from '../../types';
 import { fetchDiseases, saveDisease, deleteDisease, syncVerifiedDiseases } from '../../services/diseaseService';
 import { useAuth } from '../../context/AuthContext';
 import { cleanVietnameseText } from '../../utils/vietnameseText';
+import {
+  buildGoogleMedicineSearchUrl,
+  buildRawGoogleSearchUrl,
+  extractMedicinesFromText,
+} from '../../utils/googleMedicineSearch';
 
 interface KnowledgeLibraryProps {
   initialCrop?: CropType;
@@ -953,6 +959,85 @@ export const KnowledgeLibrary: React.FC<KnowledgeLibraryProps> = ({
                         </ul>
                       </div>
                     )}
+
+                    {/* Thuốc & Chế phẩm gợi ý (Tìm nhanh trên Google) */}
+                    {(() => {
+                      const cropLabel =
+                        selectedDisease.cropType === 'citrus'
+                          ? 'Cây Cam, Bưởi'
+                          : selectedDisease.cropType === 'rice'
+                          ? 'Cây Lúa'
+                          : 'Cây Lạc';
+                      const cleanDiseaseName = cleanVietnameseText(selectedDisease.vietnameseName);
+                      const extractedMedicines = extractMedicinesFromText(
+                        `${selectedDisease.safeManagement || ''} ${selectedDisease.preventionMethods || ''} ${guide.care3To7Days.join(' ')}`
+                      );
+                      return (
+                        <div className="bg-emerald-50/40 p-4 rounded-xl border border-emerald-200 space-y-3 text-sm sm:text-base">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <p className="font-bold text-emerald-950 flex items-center gap-2">
+                              <Sprout className="w-4 h-4 text-emerald-700 shrink-0" />
+                              <span>Thuốc & Chế phẩm gợi ý (Tìm nhanh trên Google)</span>
+                            </p>
+                            <a
+                              href={buildRawGoogleSearchUrl(
+                                `thuốc bảo vệ thực vật trị ${cleanDiseaseName} ${cropLabel} cách dùng`
+                              )}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-emerald-800 hover:text-emerald-950 underline underline-offset-2 shrink-0"
+                            >
+                              <Search className="w-3.5 h-3.5 shrink-0" />
+                              <span>Tìm thêm thuốc trên Google</span>
+                              <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                            </a>
+                          </div>
+
+                          {extractedMedicines.length > 0 ? (
+                            <div className="space-y-2">
+                              {extractedMedicines.map((med, i) => (
+                                <div
+                                  key={i}
+                                  className="bg-white rounded-xl border border-stone-200 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                                >
+                                  <span className="font-semibold text-stone-900 text-sm sm:text-base">
+                                    {med}
+                                  </span>
+                                  <a
+                                    href={buildGoogleMedicineSearchUrl(med, cleanDiseaseName, cropLabel)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                                  >
+                                    <Search className="w-3.5 h-3.5 shrink-0" />
+                                    <span>Tìm thuốc trên Google</span>
+                                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                                  </a>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white rounded-xl border border-stone-200 p-3.5">
+                              <span className="text-sm text-stone-700 leading-relaxed">
+                                Bác có thể bấm nút bên cạnh để tìm nhanh thuốc bảo vệ thực vật hoặc chế phẩm sinh học phù hợp cho bệnh <strong>{cleanDiseaseName}</strong> trên Google.
+                              </span>
+                              <a
+                                href={buildRawGoogleSearchUrl(
+                                  `thuốc bảo vệ thực vật trị ${cleanDiseaseName} ${cropLabel} cách dùng`
+                                )}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                              >
+                                <Search className="w-3.5 h-3.5 shrink-0" />
+                                <span>Tìm thuốc trên Google</span>
+                                <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                              </a>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* Nguyên tắc 4 đúng */}
                     <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 space-y-1.5 text-sm text-amber-950">

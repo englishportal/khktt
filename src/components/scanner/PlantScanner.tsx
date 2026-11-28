@@ -10,8 +10,13 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { CropType, PlantPart, DiagnosisResult, FieldQuizAnswers } from '../../types';
-import { runServerDiagnosis, saveDiagnosisRecord, fetchDiagnosisAudio } from '../../services/diagnosisService';
+import { CropType, DiagnosisResult, FieldQuizAnswers } from '../../types';
+import {
+  runServerDiagnosisWithMeta,
+  saveDiagnosisRecord,
+  fetchDiagnosisAudio,
+  incrementGlobalScanStats,
+} from '../../services/diagnosisService';
 import { useAuth } from '../../context/AuthContext';
 import { resolveSupportedCropType } from '../../utils/vietnameseText';
 import { DiagnosisReportView } from './DiagnosisReportView';
@@ -30,7 +35,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
   const { user } = useAuth();
 
   const [selectedCrop, setSelectedCrop] = useState<CropType>(initialCrop);
-  const [selectedPart, setSelectedPart] = useState<PlantPart>('leaf');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [mimeType, setMimeType] = useState<string>('image/jpeg');
 
@@ -91,18 +95,8 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
     { id: 'peanut', label: 'Cây Lạc (Đậu)', icon: '🥜' },
   ];
 
-  const partOptions: { id: PlantPart; label: string }[] = [
-    { id: 'leaf', label: 'Lá cây' },
-    { id: 'stem', label: 'Thân / Cành' },
-    { id: 'fruit', label: 'Quả / Củ' },
-    { id: 'other', label: 'Toàn cây' },
-  ];
-
   const getCropLabel = (crop: CropType) =>
     crop === 'citrus' ? 'Cây Cam, Bưởi' : crop === 'rice' ? 'Cây Lúa' : 'Cây Lạc';
-
-  const getPartLabel = (part: PlantPart) =>
-    partOptions.find((p) => p.id === part)?.label || 'Lá cây';
 
   const compressImageDataUrl = (dataUrl: string, maxDim = 1280, quality = 0.86): Promise<string> => {
     return new Promise((resolve) => {
@@ -405,6 +399,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
     isBlurry: boolean;
     isTooDark: boolean;
     isOverexposed: boolean;
+    perceptualHash?: string;
     sourceSampleId?: string;
     filenameHint?: string;
   }> => {
@@ -504,6 +499,55 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
           const rawVariance = Math.round(varSum / Math.max(lapCount, 1));
           const sharpnessScore = Math.min(100, Math.max(5, Math.round((rawVariance / 160) * 100)));
 
+          // Compute deterministic 16x16 luminance + 8x8 green-red perceptual fingerprint (80 hex chars)
+          const lumaBlocks = new Float32Array(256);
+          for (let by = 0; by < 16; by++) {
+            for (let bx = 0; bx < 16; bx++) {
+              let blockSum = 0;
+              for (let dy = 0; dy < 8; dy++) {
+                const rowOffset = (by * 8 + dy) * 128 + bx * 8;
+                for (let dx = 0; dx < 8; dx++) {
+                  blockSum += gray[rowOffset + dx];
+                }
+              }
+              lumaBlocks[by * 16 + bx] = blockSum / 64;
+            }
+          }
+          let lumaMean = 0;
+          for (let i = 0; i < 256; i++) lumaMean += lumaBlocks[i];
+          lumaMean /= 256;
+
+          const chromaBlocks = new Float32Array(64);
+          for (let by = 0; by < 8; by++) {
+            for (let bx = 0; bx < 8; bx++) {
+              let gDiffSum = 0;
+              for (let dy = 0; dy < 16; dy++) {
+                for (let dx = 0; dx < 16; dx++) {
+                  const pIdx = ((by * 16 + dy) * 128 + (bx * 16 + dx)) * 4;
+                  gDiffSum += imgData[pIdx + 1] - imgData[pIdx];
+                }
+              }
+              chromaBlocks[by * 8 + bx] = gDiffSum / 256;
+            }
+          }
+          let chromaMean = 0;
+          for (let i = 0; i < 64; i++) chromaMean += chromaBlocks[i];
+          chromaMean /= 64;
+
+          const toHexBits = (arr: Float32Array, threshold: number) => {
+            let hex = '';
+            for (let i = 0; i < arr.length; i += 4) {
+              const nibble =
+                (arr[i] >= threshold ? 8 : 0) |
+                (arr[i + 1] >= threshold ? 4 : 0) |
+                (arr[i + 2] >= threshold ? 2 : 0) |
+                (arr[i + 3] >= threshold ? 1 : 0);
+              hex += nibble.toString(16);
+            }
+            return hex;
+          };
+          const perceptualHash = `${toHexBits(lumaBlocks, lumaMean)}${toHexBits(chromaBlocks, chromaMean)}`;
+
           const total = Math.max(plantPixels, 1);
           const avgBrightness = sumBrightness / total;
           const isTooDark = avgBrightness < 40 && plantPixels > 100;
@@ -556,6 +600,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
             isBlurry,
             isTooDark,
             isOverexposed,
+            perceptualHash,
             sourceSampleId: sourceSampleCrop || undefined,
             filenameHint: fn || undefined,
           });
@@ -606,14 +651,14 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
     setRefImgError(false);
     stopSpeaking();
 
-    setScanStepMessage('Bước 1/3: Đang phân tích dấu hiệu trên ảnh và lập giả thuyết ban đầu...');
+    setScanStepMessage('Bước 1/2: Đang phân tích hình ảnh chuyên sâu và đối chiếu 132 bệnh chuẩn...');
     const step1 = setTimeout(
-      () => setScanStepMessage('Bước 2/3: Đang truy xuất tài liệu nông nghiệp từ nhiều nguồn trực tuyến...'),
-      2000
+      () => setScanStepMessage('Bước 2/2: Đang đối chiếu tài liệu nông nghiệp & thuốc bảo vệ thực vật từ Google...'),
+      3500
     );
     const step2 = setTimeout(
-      () => setScanStepMessage('Bước 3/3: Đang kiểm chứng độc lập kết quả và đánh giá độ tin cậy...'),
-      7500
+      () => setScanStepMessage('Đang hoàn thiện báo cáo chẩn đoán và hướng dẫn xử lý...'),
+      9500
     );
 
     try {
@@ -626,10 +671,10 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
           angleLabel: x.angleLabel,
         }));
 
-      const diagnosisResult = await runServerDiagnosis(
+      const { result: diagnosisResult, fromCache } = await runServerDiagnosisWithMeta(
         imagePreview,
         selectedCrop,
-        selectedPart,
+        'other',
         mimeType,
         visualMetrics,
         validExtras,
@@ -641,21 +686,30 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
 
       setResult(diagnosisResult);
 
-      await saveDiagnosisRecord({
-        userId: user?.uid || 'guest_user',
-        userEmail: user?.email || '',
-        cropType: selectedCrop,
-        plantPart: selectedPart,
-        imageUrl: imagePreview,
-        assessment: diagnosisResult,
-        suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
-        differentialDiseases: diagnosisResult.differentialDiseases
-          ? diagnosisResult.differentialDiseases.map((d) => d.diseaseName)
-          : diagnosisResult.alternativeCauses,
-        referenceSources: diagnosisResult.groundingSources || [],
-        imageQuality: diagnosisResult.imageQuality,
-        verificationStatus: 'unverified',
-      });
+      const primaryId = diagnosisResult.possibleDiagnoses?.[0]?.diseaseId;
+      const isSuccessfulScan =
+        diagnosisResult.isPlantImage !== false &&
+        diagnosisResult.selectedCropMatches !== false &&
+        primaryId !== 'unclear_due_to_blur';
+
+      await Promise.all([
+        saveDiagnosisRecord({
+          userId: user?.uid || 'guest_user',
+          userEmail: user?.email || '',
+          cropType: selectedCrop,
+          plantPart: 'other',
+          imageUrl: imagePreview,
+          assessment: diagnosisResult,
+          suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
+          differentialDiseases: diagnosisResult.differentialDiseases
+            ? diagnosisResult.differentialDiseases.map((d) => d.diseaseName)
+            : diagnosisResult.alternativeCauses,
+          referenceSources: diagnosisResult.groundingSources || [],
+          imageQuality: diagnosisResult.imageQuality,
+          verificationStatus: 'unverified',
+        }),
+        !fromCache && isSuccessfulScan ? incrementGlobalScanStats(selectedCrop) : Promise.resolve(),
+      ]);
       setIsSaved(true);
     } catch (err: any) {
       clearTimeout(step1);
@@ -688,10 +742,10 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
           mimeType: 'image/jpeg',
           angleLabel: x.angleLabel,
         }));
-      const diagnosisResult = await runServerDiagnosis(
+      const { result: diagnosisResult, fromCache } = await runServerDiagnosisWithMeta(
         imagePreview,
         newCrop,
-        selectedPart,
+        'other',
         mimeType,
         visualMetrics,
         validExtras,
@@ -699,21 +753,30 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
       );
       setResult(diagnosisResult);
 
-      await saveDiagnosisRecord({
-        userId: user?.uid || 'guest_user',
-        userEmail: user?.email || '',
-        cropType: newCrop,
-        plantPart: selectedPart,
-        imageUrl: imagePreview,
-        assessment: diagnosisResult,
-        suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
-        differentialDiseases: diagnosisResult.differentialDiseases
-          ? diagnosisResult.differentialDiseases.map((d) => d.diseaseName)
-          : diagnosisResult.alternativeCauses,
-        referenceSources: diagnosisResult.groundingSources || [],
-        imageQuality: diagnosisResult.imageQuality,
-        verificationStatus: 'unverified',
-      });
+      const primaryId = diagnosisResult.possibleDiagnoses?.[0]?.diseaseId;
+      const isSuccessfulScan =
+        diagnosisResult.isPlantImage !== false &&
+        diagnosisResult.selectedCropMatches !== false &&
+        primaryId !== 'unclear_due_to_blur';
+
+      await Promise.all([
+        saveDiagnosisRecord({
+          userId: user?.uid || 'guest_user',
+          userEmail: user?.email || '',
+          cropType: newCrop,
+          plantPart: 'other',
+          imageUrl: imagePreview,
+          assessment: diagnosisResult,
+          suspectedDiseases: diagnosisResult.possibleDiagnoses.map((d) => d.diseaseName),
+          differentialDiseases: diagnosisResult.differentialDiseases
+            ? diagnosisResult.differentialDiseases.map((d) => d.diseaseName)
+            : diagnosisResult.alternativeCauses,
+          referenceSources: diagnosisResult.groundingSources || [],
+          imageQuality: diagnosisResult.imageQuality,
+          verificationStatus: 'unverified',
+        }),
+        !fromCache && isSuccessfulScan ? incrementGlobalScanStats(newCrop) : Promise.resolve(),
+      ]);
       setIsSaved(true);
     } catch (err: any) {
       setAnalysisError(err.message || 'Có lỗi khi chuyển sang loại cây khác.');
@@ -742,21 +805,18 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
   const quickSamples = [
     {
       crop: 'citrus' as CropType,
-      part: 'leaf' as PlantPart,
       label: 'Mẫu lá Cam',
       url: '/images/citrus_leaf_hlb.jpg',
       icon: '🍊',
     },
     {
       crop: 'rice' as CropType,
-      part: 'leaf' as PlantPart,
       label: 'Mẫu lá Lúa',
       url: '/images/rice_leaf_blast.jpg',
       icon: '🌾',
     },
     {
       crop: 'peanut' as CropType,
-      part: 'leaf' as PlantPart,
       label: 'Mẫu lá Lạc',
       url: '/images/peanut_leaf_spot.jpg',
       icon: '🥜',
@@ -829,25 +889,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
               </button>
             );
           })}
-        </div>
-
-        {/* Unobtrusive 1-row part selector */}
-        <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-stone-600 mr-1">Chụp bộ phận:</span>
-          {partOptions.map((part) => (
-            <button
-              key={part.id}
-              type="button"
-              onClick={() => setSelectedPart(part.id)}
-              className={`px-3.5 py-2 rounded-xl text-sm font-semibold min-h-[40px] transition-colors cursor-pointer ${
-                selectedPart === part.id
-                  ? 'bg-emerald-700 text-white'
-                  : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-              }`}
-            >
-              {part.label}
-            </button>
-          ))}
         </div>
       </section>
 
@@ -1187,7 +1228,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
                     type="button"
                     onClick={() => {
                       setSelectedCrop(sample.crop);
-                      setSelectedPart(sample.part);
                       setImagePreview(sample.url);
                       setSourceSampleCrop(sample.crop);
                       setImageFileName(`${sample.crop}_sample.jpg`);
@@ -1381,7 +1421,7 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
                         Cây khỏe mạnh, không có bệnh!
                       </h2>
                       <p className="text-base text-stone-600">
-                        Cây đang kiểm tra: <strong>{getCropLabel(selectedCrop)}</strong> ({getPartLabel(selectedPart)})
+                        Cây đang kiểm tra: <strong>{getCropLabel(selectedCrop)}</strong>
                       </p>
                     </div>
                   </div>
@@ -1419,7 +1459,6 @@ export const PlantScanner: React.FC<PlantScannerProps> = ({
               <DiagnosisReportView
                 result={result}
                 selectedCrop={selectedCrop}
-                selectedPart={selectedPart}
                 imagePreview={imagePreview}
                 extraImages={activeExtraPreviews}
                 isSaved={isSaved}

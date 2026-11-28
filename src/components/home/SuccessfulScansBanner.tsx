@@ -5,6 +5,7 @@ import { ScanTrustSummary } from '../../services/diagnosisService';
 interface SuccessfulScansBannerProps {
   stats: ScanTrustSummary | null;
   loading?: boolean;
+  isSyncedAccount?: boolean;
   onStartScan: () => void;
   onViewHistory: () => void;
 }
@@ -12,6 +13,7 @@ interface SuccessfulScansBannerProps {
 export const SuccessfulScansBanner: React.FC<SuccessfulScansBannerProps> = ({
   stats,
   loading = false,
+  isSyncedAccount = false,
   onStartScan,
   onViewHistory,
 }) => {
@@ -70,7 +72,9 @@ export const SuccessfulScansBanner: React.FC<SuccessfulScansBannerProps> = ({
             )}
             <p className="text-xs sm:text-sm text-stone-500">
               {userScans > 0
-                ? `Trong máy của bác đã lưu ${userScans.toLocaleString('vi-VN')} lần khám thành công`
+                ? isSyncedAccount
+                  ? `Tài khoản của bác đã lưu ${userScans.toLocaleString('vi-VN')} lần khám thành công`
+                  : `Trong máy này đã lưu ${userScans.toLocaleString('vi-VN')} lần khám thành công`
                 : 'Kết quả hoàn toàn bằng tiếng Việt, dễ đọc và dễ làm theo'}
             </p>
           </div>

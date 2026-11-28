@@ -87,6 +87,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({ onStartScan, onNav
       <SuccessfulScansBanner
         stats={scanStats}
         loading={statsLoading}
+        isSyncedAccount={user?.authProvider === 'firebase'}
         onStartScan={() => onStartScan('citrus')}
         onViewHistory={() => onNavigate('history')}
       />

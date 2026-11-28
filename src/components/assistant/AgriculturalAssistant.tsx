@@ -5,8 +5,12 @@ import {
   User,
   RefreshCw,
   X,
+  Search,
+  ExternalLink,
+  Globe,
 } from 'lucide-react';
 import { ChatMessage } from '../../types';
+import { buildRawGoogleSearchUrl } from '../../utils/googleMedicineSearch';
 
 interface AgriculturalAssistantProps {
   initialContext?: {
@@ -49,7 +53,10 @@ export const AgriculturalAssistant: React.FC<AgriculturalAssistantProps> = ({
   }, [messages, loading]);
 
   const quickQuestions = [
-    'Lúa bị đạo ôn thì chữa thế nào?',
+    ...(activeContext?.suspectedDisease
+      ? [`${activeContext.crop} bị ${activeContext.suspectedDisease} thì phun thuốc gì an toàn?`]
+      : []),
+    'Lúa bị đạo ôn thì phun thuốc gì?',
     'Cây cam bị vàng lá làm sao cứu?',
     'Cách phòng bệnh đốm lá cây lạc?',
     'Chụp ảnh lá cây sao cho rõ nét?',
@@ -100,6 +107,8 @@ export const AgriculturalAssistant: React.FC<AgriculturalAssistantProps> = ({
           id: `bot_${Date.now()}`,
           sender: 'assistant',
           content: data.reply || 'Bác hỏi rõ hơn một chút để tôi trả lời chính xác nhé.',
+          suggestedMedicines: Array.isArray(data.suggestedMedicines) ? data.suggestedMedicines : [],
+          sources: Array.isArray(data.sources) ? data.sources : [],
           timestamp: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
@@ -174,6 +183,50 @@ export const AgriculturalAssistant: React.FC<AgriculturalAssistantProps> = ({
                   }`}
                 >
                   <div>{msg.content}</div>
+                  {isBot && msg.suggestedMedicines && msg.suggestedMedicines.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-stone-200 space-y-2">
+                      <p className="text-xs font-bold text-emerald-900">
+                        Tra cứu nhanh tên thuốc gợi ý trên Google:
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {msg.suggestedMedicines.map((med, idx) => (
+                          <a
+                            key={idx}
+                            href={buildRawGoogleSearchUrl(med.searchQuery || med.name)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors"
+                          >
+                            <Search className="w-3.5 h-3.5 shrink-0" />
+                            <span>{med.name}</span>
+                            <ExternalLink className="w-3 h-3 shrink-0" />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {isBot && msg.sources && msg.sources.length > 0 && (
+                    <div className="mt-2.5 pt-2.5 border-t border-stone-200 space-y-1.5">
+                      <p className="text-xs font-semibold text-stone-600 flex items-center gap-1.5">
+                        <Globe className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                        <span>Nguồn đối chiếu trực tuyến:</span>
+                      </p>
+                      <div className="flex flex-col gap-1">
+                        {msg.sources.map((src, idx) => (
+                          <a
+                            key={idx}
+                            href={src.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-emerald-800 hover:text-emerald-950 underline underline-offset-2 break-all"
+                          >
+                            <span>{src.title || src.domain || src.url}</span>
+                            <ExternalLink className="w-3 h-3 shrink-0" />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className={`mt-2 text-xs text-right ${isBot ? 'text-stone-500' : 'text-emerald-100'}`}>
                     {msg.timestamp}
                   </div>

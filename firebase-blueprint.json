@@ -82,6 +82,19 @@
         "role": { "type": "string", "maxLength": 64 }
       },
       "required": ["email", "role"]
+    },
+    "AppStats": {
+      "title": "AppStats",
+      "description": "Shared aggregate scan statistics across all devices without PII",
+      "type": "object",
+      "properties": {
+        "totalSuccessfulScans": { "type": "integer" },
+        "citrus": { "type": "integer" },
+        "rice": { "type": "integer" },
+        "peanut": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["totalSuccessfulScans", "citrus", "rice", "peanut", "updatedAt"]
     }
   },
   "firestore": {
@@ -104,6 +117,10 @@
     "/admins/{userId}": {
       "schema": "AdminRecord",
       "description": "Admin authorization documents"
+    },
+    "/app_stats/{statId}": {
+      "schema": "AppStats",
+      "description": "Publicly readable aggregate scan counters (no PII) updated monotonically on successful scans"
     }
   }
 }

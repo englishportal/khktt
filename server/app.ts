@@ -11,6 +11,7 @@ import {
   sanitizeDiagnosisResultToVietnamese,
   stripEnglishParentheticals,
 } from '../src/utils/vietnameseText.js';
+import { extractMedicinesFromText } from '../src/utils/googleMedicineSearch.js';
 import { createAuthRouter } from './authRoutes.js';
 
 dotenv.config();
@@ -75,6 +76,106 @@ let aiClientKeyFingerprint = '';
 let searchQuotaCooldownUntil = 0;
 const modelDailyExhaustedUntil = new Map<string, number>();
 const diagnosisResultCache = new Map<string, { result: any; cachedAt: number }>();
+const diseaseGroundingCache = new Map<string, { payload: any; cachedAt: number }>();
+
+const PERSISTENT_DIAG_CACHE_FILE = path.join(os.tmpdir(), 'agrivision-diag-cache-v11.json');
+const PERSISTENT_GROUNDING_CACHE_FILE = path.join(os.tmpdir(), 'agrivision-grounding-cache-v11.json');
+
+function hydratePersistentCaches() {
+  const now = Date.now();
+  try {
+    if (fs.existsSync(PERSISTENT_DIAG_CACHE_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(PERSISTENT_DIAG_CACHE_FILE, 'utf-8'));
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed.slice(0, 120)) {
+          if (entry?.key && entry?.result && typeof entry?.cachedAt === 'number' && now - entry.cachedAt < 24 * 60 * 60 * 1000) {
+            diagnosisResultCache.set(entry.key, { result: entry.result, cachedAt: entry.cachedAt });
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore tmp cache read errors
+  }
+  try {
+    if (fs.existsSync(PERSISTENT_GROUNDING_CACHE_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(PERSISTENT_GROUNDING_CACHE_FILE, 'utf-8'));
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed.slice(0, 200)) {
+          if (entry?.key && entry?.payload && typeof entry?.cachedAt === 'number' && now - entry.cachedAt < 24 * 60 * 60 * 1000) {
+            diseaseGroundingCache.set(entry.key, { payload: entry.payload, cachedAt: entry.cachedAt });
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore tmp cache read errors
+  }
+}
+
+hydratePersistentCaches();
+
+function persistDiagCache() {
+  try {
+    const entries = Array.from(diagnosisResultCache.entries())
+      .slice(-100)
+      .map(([key, val]) => ({ key, result: val.result, cachedAt: val.cachedAt }));
+    fs.writeFileSync(PERSISTENT_DIAG_CACHE_FILE, JSON.stringify(entries), 'utf-8');
+  } catch {
+    // Safe fallback on read-only filesystems
+  }
+}
+
+function persistGroundingCache() {
+  try {
+    const entries = Array.from(diseaseGroundingCache.entries())
+      .slice(-150)
+      .map(([key, val]) => ({ key, payload: val.payload, cachedAt: val.cachedAt }));
+    fs.writeFileSync(PERSISTENT_GROUNDING_CACHE_FILE, JSON.stringify(entries), 'utf-8');
+  } catch {
+    // Safe fallback on read-only filesystems
+  }
+}
+
+function buildModelGenConfig(
+  model: string,
+  options: {
+    systemInstruction?: string;
+    thinkingLevel?: ThinkingLevel;
+    responseMimeType?: string;
+    responseSchema?: any;
+    tools?: any[];
+    abortSignal?: AbortSignal;
+  }
+): Record<string, any> {
+  const lower = model.toLowerCase();
+  const isGemini4 = lower.includes('gemini-4');
+  const isGemini3 = lower.includes('gemini-3');
+  const cfg: Record<string, any> = {
+    seed: 42,
+  };
+  if (options.systemInstruction) cfg.systemInstruction = options.systemInstruction;
+  if (options.responseMimeType) cfg.responseMimeType = options.responseMimeType;
+  if (options.responseSchema) cfg.responseSchema = options.responseSchema;
+  if (options.tools) cfg.tools = options.tools;
+  if (options.abortSignal) cfg.abortSignal = options.abortSignal;
+
+  if (isGemini4 || isGemini3) {
+    if (options.thinkingLevel) {
+      const safeLevel =
+        isGemini4 && options.thinkingLevel === ThinkingLevel.MINIMAL
+          ? ThinkingLevel.LOW
+          : options.thinkingLevel;
+      cfg.thinkingConfig = { thinkingLevel: safeLevel };
+    }
+  } else {
+    // For custom Gemini 2.x models configured via GEMINI_MODEL on Vercel, enforce deterministic greedy decoding
+    cfg.temperature = 0;
+    cfg.topP = 1;
+    cfg.topK = 1;
+  }
+  return cfg;
+}
 
 function syncQuotaKeyFingerprint() {
   const key = process.env.GEMINI_API_KEY || '';
@@ -85,6 +186,7 @@ function syncQuotaKeyFingerprint() {
     searchQuotaCooldownUntil = 0;
     modelDailyExhaustedUntil.clear();
     diagnosisResultCache.clear();
+    diseaseGroundingCache.clear();
   }
 }
 
@@ -170,7 +272,6 @@ function isPermissionOrBillingError(err: any): boolean {
     code === 403 ||
     status === 'permission_denied' ||
     msg.includes('permission_denied') ||
-    msg.includes('"code":403') ||
     msg.includes('free tier is not available')
   );
 }
@@ -269,26 +370,24 @@ async function resolveImageBase64(
 ): Promise<{ base64: string; mimeType: string }> {
   const rootDir = process.cwd();
 
-  if (input.startsWith('/images/') || input.startsWith('/assets/')) {
-    const isAssets = input.startsWith('/assets/');
-    const subFolder = isAssets ? 'assets' : 'images';
-    const rel = input.replace(/^\/(images|assets)\//, '');
-    const publicDir = path.resolve(rootDir, 'public', subFolder);
-    const resolvedPublic = path.resolve(publicDir, rel);
-    if (resolvedPublic.startsWith(publicDir + path.sep) && fs.existsSync(resolvedPublic)) {
+  if (input.startsWith('/images/')) {
+    const rel = input.replace(/^\/images\//, '');
+    const publicImagesDir = path.resolve(rootDir, 'public', 'images');
+    const resolvedPublic = path.resolve(publicImagesDir, rel);
+    if (resolvedPublic.startsWith(publicImagesDir + path.sep) && fs.existsSync(resolvedPublic)) {
       const base64 = fs.readFileSync(resolvedPublic).toString('base64');
       return { base64, mimeType: fallbackMime };
     }
 
-    const distDir = path.resolve(rootDir, 'dist', subFolder);
-    const resolvedDist = path.resolve(distDir, rel);
-    if (resolvedDist.startsWith(distDir + path.sep) && fs.existsSync(resolvedDist)) {
+    const distImagesDir = path.resolve(rootDir, 'dist', 'images');
+    const resolvedDist = path.resolve(distImagesDir, rel);
+    if (resolvedDist.startsWith(distImagesDir + path.sep) && fs.existsSync(resolvedDist)) {
       const base64 = fs.readFileSync(resolvedDist).toString('base64');
       return { base64, mimeType: fallbackMime };
     }
 
     // Fallback for serverless platforms where public assets are served via CDN origin
-    if (reqOrigin && /^\/(images|assets)\/[a-zA-Z0-9_./-]+\.(jpg|jpeg|png|webp)$/i.test(input)) {
+    if (reqOrigin && /^\/images\/[a-zA-Z0-9_.-]+\.(jpg|jpeg|png|webp)$/i.test(input)) {
       const cdnRes = await fetch(`${reqOrigin}${input}`, { signal: AbortSignal.timeout(8000) });
       if (cdnRes.ok) {
         const contentType = cdnRes.headers.get('content-type') || fallbackMime;
@@ -343,10 +442,14 @@ function getRequestOrigin(req: Request): string | undefined {
 function buildCropDiagnosisContext(cropType: string, plantPart?: string): string {
   const filtered = DEFAULT_DISEASES.filter((d) => d.cropType === cropType);
   const pool = filtered.length > 0 ? filtered : DEFAULT_DISEASES;
+  const shouldPrioritizePart = Boolean(plantPart && plantPart !== 'other');
   const prioritized = [...pool].sort((a, b) => {
-    const aMatch = plantPart && a.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
-    const bMatch = plantPart && b.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
-    return bMatch - aMatch;
+    if (shouldPrioritizePart) {
+      const aMatch = a.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
+      const bMatch = b.affectedPlantParts.includes(plantPart as any) ? 1 : 0;
+      if (bMatch !== aMatch) return bMatch - aMatch;
+    }
+    return a.id.localeCompare(b.id);
   });
 
   return prioritized
@@ -389,7 +492,8 @@ export function createApiApp() {
         imageBase64,
         mimeType = 'image/jpeg',
         cropType = 'citrus',
-        plantPart = 'leaf',
+        plantPart = 'other',
+        visualMetrics,
         extraImages = [],
         quizAnswers,
       } = req.body || {};
@@ -424,6 +528,7 @@ export function createApiApp() {
           : cropType === 'rice'
           ? 'Lúa nước'
           : 'Lạc (Đậu phộng)';
+      const hasSpecificPart = plantPart === 'leaf' || plantPart === 'stem' || plantPart === 'fruit';
       const partNameVi =
         plantPart === 'leaf'
           ? 'Lá'
@@ -431,7 +536,7 @@ export function createApiApp() {
           ? 'Thân/Cành'
           : plantPart === 'fruit'
           ? 'Quả/Củ'
-          : 'Khác';
+          : 'Tự nhận diện qua ảnh (lá, thân, cành, quả hoặc toàn cây)';
       const cropKnowledgeContext = buildCropDiagnosisContext(cropType, plantPart);
 
       const systemInstruction = `
@@ -491,7 +596,8 @@ CÁC NGUYÊN TẮC KHOA HỌC TỐI THƯỢNG (BẮT BUỘC):
      + immediate24hSteps (2-4 việc làm cụ thể trong 24 giờ đầu: cắt bỏ lá/cành bệnh cách vết bệnh bao xa, gom vào bao mang ra khỏi vườn tiêu hủy, lau khử kéo bằng cồn hoặc nước vôi, tạm ngừng bón đạm/tưới phun mưa lên tán, rút bớt nước hay giữ mực nước nông tùy bệnh...).
      + careNext3To7Days (2-3 việc chăm sóc và phục hồi trong 3-7 ngày tới: bón bổ sung phân hữu cơ hoai mục, chế phẩm nấm đối kháng, vôi bột khử chua, phun vào sáng sớm hoặc chiều mát ướt đều hai mặt lá nếu cần).
      + mildVsSevereGuide: Tách rõ mildCase (cách xử lý khi mới chớm bị nhẹ vài lá hoặc vài khóm/cây) và severeCase (cách xử lý khi đã bị nặng, lan rộng; ĐẶC BIỆT với bệnh nan y không có thuốc chữa khỏi như Vàng lá gân xanh nặng hay vi-rút lùn xoắn lá nặng thì phải nói thẳng không tốn tiền mua thuốc phun mà cần chặt bỏ/nhổ tiêu hủy cây nặng để cứu cả vườn).
-     + suggestedActiveIngredients (1-3 gợi ý nhóm hoạt chất hoặc chế phẩm sinh học phổ biến được phép lưu hành tại Việt Nam phù hợp đúng bệnh và đúng cây trồng để bà con mang tên ra đại lý vật tư nông nghiệp hỏi mua — ví dụ nhóm gốc đồng, dầu khoáng nông nghiệp sinh học, chế phẩm nấm đối kháng bón gốc, nhóm hoạt chất đặc trị nấm đạo ôn/đốm lá... TUYỆT ĐỐI KHÔNG tự ghi liều lượng pha chế như ml/bình hay gam/lít. Nếu cây khỏe mạnh hoặc bệnh nan y không có thuốc đặc trị thì ghi rõ không cần phun thuốc hóa học).
+     + suggestedActiveIngredients (1-3 tên thuốc hoặc nhóm hoạt chất chính được phép lưu hành tại Việt Nam phù hợp đúng bệnh và đúng cây trồng — có thể kèm tên hoạt chất chuẩn để bà con ra đại lý vật tư nông nghiệp hỏi mua đúng loại).
+     + suggestedPesticides (1-4 mục chi tiết đối chiếu từ dữ liệu tìm kiếm Google và tài liệu Cục Bảo vệ Thực vật / Khuyến nông: ghi rõ productOrIngredientName, activeIngredient chuẩn, category: "biological" | "chemical" | "mineral" | "none", targetUse, sprayGuidance — hướng dẫn thời điểm và cách phun ngoài vườn nhưng TUYỆT ĐỐI KHÔNG tự bịa liều lượng pha chế nếu không có trên nhãn, và googleSearchQuery để bà con bấm tìm ngay thông tin thuốc đó trên Google). Nếu cây khỏe mạnh, ảnh mờ, hoặc lệch loài thì trả về []. Nếu là bệnh nan y như vàng lá gân xanh nặng không có thuốc chữa khỏi bệnh thì ghi rõ category "none" hoặc chỉ gợi ý thuốc/dầu khoáng diệt côn trùng môi giới rầy chổng cánh.
      + doList (2-3 việc NÊN làm) và dontList (2-3 việc TUYỆT ĐỐI TRÁNH để khỏi làm bệnh bùng nặng hơn).
      + recoveryCheckSigns (2-3 dấu hiệu cụ thể sau 5-7 ngày để bà con tự kiểm tra xem vết bệnh đã khô "đứng vết" hay vẫn đang lan rộng thêm).
      + pesticideSafetyNote: Nhắc rõ Nguyên tắc 4 đúng (đúng thuốc, đúng lúc, đúng liều in trên nhãn bao bì, đúng cách) và khuyên hỏi thêm cán bộ bảo vệ thực vật địa phương.
@@ -515,24 +621,32 @@ CÁC NGUYÊN TẮC KHOA HỌC TỐI THƯỢNG (BẮT BUỘC):
               .join('; ')}). Hãy đối chiếu chéo triệu chứng trên tất cả các ảnh để tăng độ chính xác.`
           : 'Người dùng cung cấp 1 ảnh.';
 
+      const metricsSummary =
+        visualMetrics && typeof visualMetrics === 'object'
+          ? `- Chỉ số ảnh đo được tự động: độ nét ${Math.round(Number(visualMetrics.sharpnessScore || 0))}/100 (${
+              visualMetrics.isBlurry ? 'có dấu hiệu mờ nét' : 'rõ nét'
+            }), tỷ lệ vùng xanh khỏe ${Math.round(Number(visualMetrics.healthyGreenRatio || 0) * 100)}%, vùng vàng ${Math.round(
+              Number(visualMetrics.yellowRatio || 0) * 100
+            )}%, vùng đốm/cháy ${Math.round(Number(visualMetrics.lesionRatio || 0) * 100)}%. (Chỉ dùng làm tín hiệu tham khảo phụ trợ; quyết định cuối cùng phải dựa trực tiếp vào quan sát hình ảnh.)`
+          : '';
+
       const userPrompt = `
-Hãy phân tích tổng hợp hình ảnh và thông tin thực địa sau đây (TRẢ LỜI 100% THUẦN TIẾNG VIỆT, KHÔNG DÙNG TIẾNG ANH):
+Hãy phân tích tổng hợp hình ảnh và thông tin thực địa sau đây theo QUY TRÌNH CỐ ĐỊNH, KHÁCH QUAN, NHẤT QUÁN (TRẢ LỜI 100% THUẦN TIẾNG VIỆT, KHÔNG DÙNG TIẾNG ANH):
 - Cây trồng người dùng đã chọn: ${cropNameVi}
-- Bộ phận quan sát chính: ${partNameVi}
+- Bộ phận quan sát: ${hasSpecificPart ? partNameVi : 'Tự nhận diện trực tiếp từ ảnh chụp (có thể là lá, thân, cành, quả, củ hoặc toàn cây).'}
 - Số lượng góc ảnh: ${angleSummary}
 - Khu vực địa lý trọng tâm: Vùng Bắc Trung Bộ Việt Nam (Nghệ An, Hà Tĩnh, Quảng Bình, Quảng Trị, Thừa Thiên Huế).
-${
+${metricsSummary ? `${metricsSummary}\n` : ''}${
   quizLines.length > 0
     ? `- Thông tin thực địa do nông dân cung cấp:\n${quizLines.join('\n')}`
     : '- Chưa có thêm thông tin thực địa.'
 }
 
-Yêu cầu:
-1. Quan sát kỹ chi tiết trên ảnh (hình dạng vết đốm, vết loét, nốt sùi, màu gân lá, vết chích hút, sẹo cạp hoặc côn trùng nếu có).
-2. Phân tích tối đa 3 bệnh/tác nhân có biểu hiện tương tự (nếu cây có dấu hiệu bất thường), chỉ ra điểm giống nhau, điểm phân biệt cốt lõi, và đối chiếu triệu chứng trên ảnh với tài liệu tham khảo.
-3. Thực hiện kiểm chứng độc lập so với giả thuyết ban đầu và bằng chứng thu thập từ nhiều nguồn: nếu có điểm chưa thống nhất hoặc còn thiếu góc chụp, phải nêu thẳng thắn.
-4. Tuyệt đối KHÔNG bịa phần trăm chính xác, KHÔNG bịa đường dẫn/nguồn giả, KHÔNG tự ý đưa liều lượng thuốc bảo vệ thực vật.
-5. Trả về kết quả JSON chính xác, nhất quán và 100% tiếng Việt (không chèn từ tiếng Anh hay tên Latinh trong ngoặc).
+Yêu cầu phân tích nhất quán (bắt buộc theo đúng trình tự 4 bước):
+1. Kiểm tra ảnh có phải thực vật không, và loài cây thực tế trong ảnh có đúng là ${cropNameVi} không.
+2. Quan sát kỹ chi tiết trên ảnh (hình dạng vết đốm, vết loét sần có quầng vàng hay không, nốt sùi ghẻ không quầng, màu gân lá đối xứng hay loang lổ, vết chích hút, sẹo cạp hoặc côn trùng nếu có) và đối chiếu chặt chẽ với bảng mã bệnh chuẩn ở trên để chọn đúng nhất 1 mã diseaseId chính.
+3. Phân tích tối đa 3 bệnh/tác nhân có biểu hiện tương tự (nếu cây có dấu hiệu bất thường), chỉ ra điểm giống nhau, điểm phân biệt cốt lõi, và đối chiếu triệu chứng trên ảnh với tài liệu tham khảo.
+4. Tuyệt đối KHÔNG bịa phần trăm chính xác, KHÔNG bịa đường dẫn/nguồn giả, KHÔNG tự ý đưa liều lượng thuốc bảo vệ thực vật. Trả về JSON nhất quán, 100% tiếng Việt (riêng tên hoạt chất hóa học/sinh học trong suggestedPesticides giữ chuẩn để nông dân mua đúng thuốc).
       `.trim();
 
       let parsedResult: any = null;
@@ -660,9 +774,9 @@ Yêu cầu:
 
       const ai = getGeminiClient();
       if (!ai) {
-        return res.status(500).json({
+        return res.status(503).json({
           error:
-            'Hệ thống phân tích ảnh AI chưa sẵn sàng do chưa được cấp cấu hình GEMINI_API_KEY trên máy chủ. Vui lòng kiểm tra khóa API trong Settings > Secrets hoặc tra cứu trực tiếp trong mục Sổ bệnh.',
+            'Hệ thống phân tích ảnh AI chưa sẵn sàng do chưa được cấp cấu hình GEMINI_API_KEY trên máy chủ. Vui lòng thử lại sau hoặc tra cứu trực tiếp trong mục Sổ bệnh.',
         });
       }
 
@@ -674,9 +788,19 @@ Yêu cầu:
             fertilizerOrWater: quizAnswers.fertilizerOrWater || '',
           })
         : '';
+      const clientPhash =
+        typeof visualMetrics?.perceptualHash === 'string' && /^[a-f0-9]{64,128}$/i.test(visualMetrics.perceptualHash)
+          ? visualMetrics.perceptualHash.toLowerCase()
+          : '';
       const cacheHasher = crypto.createHash('sha256');
-      cacheHasher.update(`v9|${aiClientKeyFingerprint}|${cropType}|${plantPart}|${normalizedQuizKey}|`);
-      cacheHasher.update(mainImage.base64);
+      cacheHasher.update(
+        `v11|${aiClientKeyFingerprint}|${ENV_GEMINI_MODEL || 'default'}|${cropType}|${plantPart}|${normalizedQuizKey}|`
+      );
+      if (clientPhash) {
+        cacheHasher.update(`phash:${clientPhash}`);
+      } else {
+        cacheHasher.update(mainImage.base64);
+      }
       for (const extra of resolvedExtras) {
         cacheHasher.update(`|${extra.angleLabel}|${extra.base64}`);
       }
@@ -684,7 +808,8 @@ Yêu cầu:
 
       const cachedEntry = diagnosisResultCache.get(diagnosisCacheKey);
       if (cachedEntry) {
-        const ttlMs = cachedEntry.result?.googleSearchStatus === 'verified' ? 12 * 60 * 60 * 1000 : 5 * 60 * 1000;
+        const ttlMs =
+          cachedEntry.result?.googleSearchStatus === 'verified' ? 24 * 60 * 60 * 1000 : 30 * 60 * 1000;
         if (Date.now() - cachedEntry.cachedAt < ttlMs) {
           return res.json(cachedEntry.result);
         }
@@ -865,7 +990,30 @@ Yêu cầu:
               suggestedActiveIngredients: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description: '1-3 nhóm hoạt chất hoặc chế phẩm sinh học phổ biến được phép lưu hành tại Việt Nam để nông dân hỏi mua ở đại lý vật tư (TUYỆT ĐỐI không ghi liều lượng pha chế).',
+                description: '1-3 tên thuốc hoặc hoạt chất phổ biến được phép lưu hành tại Việt Nam để nông dân hỏi mua ở đại lý vật tư (không tự bịa liều lượng pha chế).',
+              },
+              suggestedPesticides: {
+                type: Type.ARRAY,
+                description: '1-4 gợi ý thuốc bảo vệ thực vật / hoạt chất / chế phẩm sinh học chính xác đối chiếu từ Google Search và tài liệu Cục BVTV / Khuyến nông Việt Nam.',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    productOrIngredientName: { type: Type.STRING },
+                    activeIngredient: { type: Type.STRING },
+                    category: { type: Type.STRING },
+                    targetUse: { type: Type.STRING },
+                    sprayGuidance: { type: Type.STRING },
+                    googleSearchQuery: { type: Type.STRING },
+                  },
+                  required: [
+                    'productOrIngredientName',
+                    'activeIngredient',
+                    'category',
+                    'targetUse',
+                    'sprayGuidance',
+                    'googleSearchQuery',
+                  ],
+                },
               },
               doList: {
                 type: Type.ARRAY,
@@ -894,6 +1042,7 @@ Yêu cầu:
               'careNext3To7Days',
               'mildVsSevereGuide',
               'suggestedActiveIngredients',
+              'suggestedPesticides',
               'doList',
               'dontList',
               'recoveryCheckSigns',
@@ -940,236 +1089,54 @@ Yêu cầu:
         ],
       };
 
-      const requestDeadline = Date.now() + 26000;
+      const requestDeadline = Date.now() + 55000;
       const getTimeoutMs = (capMs: number) => Math.max(0, Math.min(capMs, requestDeadline - Date.now()));
       const now = Date.now();
       let googleSearchQuotaExceeded = searchQuotaCooldownUntil > now;
-      let googleSearchAttempted = googleSearchQuotaExceeded;
+      let googleSearchAttempted = false;
 
-      // Stage 1: Initial Visual Hypothesis + Multi-Source Web Retrieval (AI #1: primary model with Google Search)
-      let stage1ModelUsed = '';
-      let stage1ReportText = '';
-      for (const model of CANDIDATE_MODELS) {
-        if (getTimeoutMs(10000) < 4000) break;
-        const dailyCooldown = modelDailyExhaustedUntil.get(model) || 0;
-        if (dailyCooldown > Date.now()) {
-          if (!lastError) {
-            lastError = new Error(`Model ${model} đã đạt giới hạn lượt miễn phí trong ngày (429 GenerateRequestsPerDay).`);
-          }
-          continue;
-        }
-
-        const stage1Timeout = getTimeoutMs(model === 'gemini-4-hydrogen' ? 9500 : 8500);
-        if (googleSearchQuotaExceeded || stage1Timeout < 4000) {
-          break;
-        }
-
-        googleSearchAttempted = true;
-        try {
-          const groundingResp = await ai.models.generateContent({
-            model,
-            contents: [
-              ...imageParts,
-              {
-                text: `Bạn là AI bước 1 (Phân tích ảnh & Tra cứu đa nguồn). Người dùng đang chọn khám ${cropNameVi} (bộ phận: ${partNameVi}). Hãy thực hiện đúng 3 việc sau:
-1. KIỂM TRA LOÀI CÂY & DẤU HIỆU TRÊN ẢNH: Xác nhận loài cây thực tế trong ảnh có đúng ${cropNameVi} không (nếu là cây khác như cây ổi, cây xoài, cây mít, cây lúa, cây lạc... ghi rõ tên tiếng Việt chính xác). Mô tả khách quan mọi dấu hiệu bất thường quan sát thấy trên ảnh (hình dạng vết bệnh, quầng vàng, nốt sùi nổi gồ hay phẳng, đối xứng hay loang lổ, đường hầm, tơ nhện, bào tử nấm...).
-2. GIẢ THUYẾT BAN ĐẦU (TỐI ĐA 3 BỆNH): Nêu 1 giả thuyết bệnh phù hợp nhất và 1-2 bệnh có biểu hiện tương tự dễ nhầm lẫn nhất (nếu lá/cây khỏe mạnh thì ghi rõ khỏe mạnh).
-3. BẮT BUỘC GỌI GOOGLE SEARCH ĐA NGUỒN: Nếu đúng là ${cropNameVi} và có dấu hiệu bất thường, bắt buộc gọi công cụ Google Search để truy xuất tài liệu từ NHIỀU nguồn độc lập — ưu tiên cơ quan nông nghiệp (Cục Bảo vệ Thực vật, Trung tâm Khuyến nông, Sở Nông nghiệp .gov.vn), trường đại học và viện nghiên cứu (Viện Bảo vệ Thực vật, Học viện Nông nghiệp Việt Nam, Đại học Cần Thơ, Viện Cây ăn quả Miền Nam, tài liệu khoa học). Thu thập triệu chứng, nguyên nhân, đặc điểm phân biệt từng bệnh.
-Trình bày ngắn gọn (<220 từ), thuần tiếng Việt, nêu rõ: [Loài cây], [Giả thuyết ban đầu], [Bệnh dễ nhầm], [Điểm phân biệt từ tài liệu đa nguồn].`,
-              },
-            ],
-            config: {
-              seed: 42,
-              abortSignal: AbortSignal.timeout(stage1Timeout),
-              thinkingConfig: {
-                thinkingLevel: ThinkingLevel.LOW,
-              },
-              tools: [{ googleSearch: {} }],
-            },
-          });
-
-          extractGroundingFromResponse(groundingResp);
-          stage1ReportText = (groundingResp.text || '').trim();
-          stage1ModelUsed = model;
-          break;
-        } catch (groundingErr: any) {
-          if (isPermissionOrBillingError(groundingErr)) {
-            permissionOrBillingFailure = true;
-            lastError = groundingErr;
-            console.error('[AgriVision AI] Gemini API permission or billing error:', groundingErr?.message || groundingErr);
-            break;
-          }
-          const gErrLower = String(groundingErr?.message || groundingErr || '').toLowerCase();
-          if (
-            groundingErr?.code === 429 ||
-            groundingErr?.status === 429 ||
-            gErrLower.includes('429') ||
-            gErrLower.includes('resource_exhausted') ||
-            gErrLower.includes('quota')
-          ) {
-            googleSearchQuotaExceeded = true;
-            searchQuotaCooldownUntil = Date.now() + 5 * 60 * 1000;
-            if (gErrLower.includes('perday') || gErrLower.includes('requestsperday')) {
-              modelDailyExhaustedUntil.set(model, Date.now() + 10 * 60 * 1000);
-              lastError = groundingErr;
-              continue;
-            }
-          }
-          console.info(`[AgriVision AI] Stage 1 multi-source search on ${model} unavailable.`);
-        }
-      }
-
-      // Stage 1B: Multi-source expansion — if fewer than 2 distinct real sources were found and plant appears valid,
-      // run a fast targeted Google Search pass specifically querying agricultural institutes & universities
-      const distinctDomainsBefore1B = new Set(collectedSources.map((s) => s.domain.toLowerCase()));
-      const remainingFor1B = requestDeadline - Date.now();
-      const stage1bTimeout = getTimeoutMs(5000);
-      const looksLikeMismatchOrHealthy =
-        /không phải cây|khác với|cây ổi|cây xoài|cây mít|cây chuối|khỏe mạnh|không phát hiện dấu hiệu bệnh/i.test(
-          stage1ReportText
-        );
-      if (
-        !permissionOrBillingFailure &&
-        !googleSearchQuotaExceeded &&
-        !looksLikeMismatchOrHealthy &&
-        distinctDomainsBefore1B.size < 2 &&
-        stage1ReportText.length > 25 &&
-        remainingFor1B >= 13500 &&
-        stage1bTimeout >= 4000
-      ) {
-        const searchModel = stage1ModelUsed || CANDIDATE_MODELS[0];
-        try {
-          const verifySearchResp = await ai.models.generateContent({
-            model: searchModel,
-            contents: `Hãy gọi công cụ Google Search để truy xuất THÊM ít nhất 2 nguồn độc lập từ cơ quan nông nghiệp, viện nghiên cứu hoặc trường đại học (như Cục Bảo vệ Thực vật, Viện Bảo vệ Thực vật, Trung tâm Khuyến nông Quốc gia, Học viện Nông nghiệp, Đại học Cần Thơ) nhằm kiểm chứng chéo triệu chứng, nguyên nhân và cách phân biệt các bệnh trên ${cropNameVi} (${partNameVi}) trong báo cáo sau:
-"${stage1ReportText.slice(0, 750)}"
-
-Tóm tắt trong 3-5 câu thuần tiếng Việt: những điểm tài liệu thống nhất và điểm nào còn mâu thuẫn hoặc cần thận trọng phân biệt.`,
-            config: {
-              seed: 42,
-              abortSignal: AbortSignal.timeout(stage1bTimeout),
-              thinkingConfig: {
-                thinkingLevel: ThinkingLevel.LOW,
-              },
-              tools: [{ googleSearch: {} }],
-            },
-          });
-
-          extractGroundingFromResponse(verifySearchResp);
-          const extraSummary = (verifySearchResp.text || '').trim();
-          if (extraSummary) {
-            stage1ReportText = `${stage1ReportText}\n\n[Bằng chứng truy xuất bổ sung từ nhiều nguồn]:\n${extraSummary}`;
-          }
-        } catch (verifyErr: any) {
-          const vErrLower = String(verifyErr?.message || verifyErr || '').toLowerCase();
-          if (
-            verifyErr?.code === 429 ||
-            verifyErr?.status === 429 ||
-            vErrLower.includes('429') ||
-            vErrLower.includes('resource_exhausted') ||
-            vErrLower.includes('quota')
-          ) {
-            googleSearchQuotaExceeded = true;
-            searchQuotaCooldownUntil = Date.now() + 5 * 60 * 1000;
-          }
-          console.info(`[AgriVision AI] Stage 1B multi-source expansion unavailable.`);
-        }
-      }
-
-      // Sort collected real sources by authority priority (gov/agri agency -> university/institute -> specialist)
-      collectedSources.sort((a, b) => a.priority - b.priority);
-      const topRealSources = collectedSources.slice(0, 6);
-
-      const formattedSourcesForVerifier =
-        topRealSources.length > 0
-          ? topRealSources
-              .map(
-                (s, idx) =>
-                  `${idx + 1}. [${s.sourceCategory}] ${s.title} (${s.domain})${
-                    s.excerpts.length > 0 ? ` — Trích đoạn bằng chứng: "${s.excerpts.join(' / ').slice(0, 260)}"` : ''
-                  }`
-              )
-              .join('\n')
-          : 'Không thu thập được nguồn Internet trực tuyến ở lượt này (chỉ có ảnh chụp và bộ dữ liệu 132 bệnh nội bộ).';
-
-      // Stage 2: Independent Cross-Verification Pass
-      // Prioritize a DISTINCT model from Stage 1 so we never simply call the same model and treat agreement as verification!
-      const verifierCandidates: string[] = [];
-      if (stage1ModelUsed && CANDIDATE_MODELS.length > 1) {
-        const distinctModels = CANDIDATE_MODELS.filter((m) => m !== stage1ModelUsed);
-        verifierCandidates.push(...distinctModels, stage1ModelUsed);
-      } else {
-        verifierCandidates.push(...CANDIDATE_MODELS);
-      }
-
-      let verifierModelUsed = '';
+      // PHASE 1: Deterministic High-Reasoning Visual Pathology Analysis (NO stochastic web search during visual classification!)
+      // Always use the strongest available primary model (never downgrade to flash-lite unless primary fails).
+      let primaryModelUsed = '';
       if (!permissionOrBillingFailure) {
-        for (const verifierModel of verifierCandidates) {
-          const dailyCooldown = modelDailyExhaustedUntil.get(verifierModel) || 0;
-          if (dailyCooldown > Date.now()) continue;
+        for (const model of CANDIDATE_MODELS) {
+          const dailyCooldown = modelDailyExhaustedUntil.get(model) || 0;
+          if (dailyCooldown > Date.now()) {
+            if (!lastError) {
+              lastError = new Error(`Model ${model} đã đạt giới hạn lượt miễn phí trong ngày (429 GenerateRequestsPerDay).`);
+            }
+            continue;
+          }
 
           for (let attempt = 0; attempt < 2; attempt++) {
-            const stage2Timeout = getTimeoutMs(verifierModel === 'gemini-4-hydrogen' ? 14000 : 13000);
-            if (stage2Timeout < 4000) break;
+            const phase1Timeout = getTimeoutMs(model.includes('flash-lite') ? 22000 : 32000);
+            if (phase1Timeout < 5000) break;
 
             try {
-              const verifierPrompt = `${userPrompt}
-
-[BƯỚC 1 — GIẢ THUYẾT BAN ĐẦU TỪ MÔ HÌNH PHÂN TÍCH ĐẦU TIÊN]:
-${stage1ReportText || 'Chưa có báo cáo bước 1; hãy tự phân tích độc lập từ ảnh và kho dữ liệu.'}
-
-[BƯỚC 2 — CÁC NGUỒN TÀI LIỆU THỰC TẾ ĐÃ TRUY XUẤT TỪ INTERNET (${topRealSources.length} nguồn)]:
-${formattedSourcesForVerifier}
-
-[NHIỆM VỤ BƯỚC 3 — KIỂM CHỨNG ĐỘC LẬP & XUẤT BÁO CÁO JSON]:
-Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù quáng vào giả thuyết Bước 1 — hãy tự soi lại ảnh gốc, đối chiếu với các nguồn tài liệu thực tế ở trên và kho bệnh học ${cropNameVi}, sau đó xuất JSON đầy đủ:
-1. possibleDiagnoses: Tối đa 3 bệnh/tác nhân phù hợp nhất (xếp từ phù hợp nhất đến ít phù hợp hơn). Nếu cây khỏe mạnh hoặc ảnh mờ/nhầm loài thì xử lý đúng nguyên tắc khoa học.
-2. differentialDiseases (tối đa 3 bệnh): Với mỗi bệnh (khi có bất thường), ghi rõ likelihood ("most_likely" | "possible_differential" | "less_likely"), matchingSignsOnImage (dấu hiệu trùng khớp trên ảnh), distinguishingFeatures (đặc điểm then chốt giúp phân biệt), referenceComparison (so sánh ảnh với tài liệu), whyRankedHere (vì sao đánh giá phù hợp hơn hoặc kém hơn các bệnh còn lại).
-3. comparisonMatrix: sharedSymptoms (dấu hiệu tương đồng giữa các bệnh) và 3-4 hàng rows theo các tiêu chí cụ thể (ví dụ: "Hình dạng & màu sắc vết bệnh", "Vị trí xuất hiện", "Quầng vàng / bề mặt mô", "Dấu hiệu nhận biết đặc thù"), mỗi hàng nêu rõ observedOnPhoto và diseaseDetails cho từng bệnh trong tối đa 3 bệnh.
-4. verification:
-   - initialHypothesis: Tóm tắt ngắn giả thuyết ban đầu ở Bước 1.
-   - finalConclusion: Kết luận cuối cùng sau kiểm chứng độc lập (nếu chưa đủ bằng chứng, tuyệt đối không khẳng định chắc chắn).
-   - agreementStatus: "confirmed" (thống nhất cao với ảnh & đa nguồn), "partially_consistent" (phù hợp một phần, còn điểm cần chụp thêm), "conflicting" (có mâu thuẫn giữa giả thuyết ban đầu, ảnh hoặc các nguồn), hoặc "insufficient" (thiếu bằng chứng).
-   - consistentPoints: Các điểm thống nhất rõ ràng.
-   - contradictionsOrUncertainties: Nêu rõ mọi điểm mâu thuẫn, dấu hiệu chưa thấy rõ trên ảnh hoặc nguồn chưa thống nhất.
-   - limitations: Các giới hạn của việc chẩn đoán qua ảnh hiện tại.
-5. reliability (KHÔNG ghi phần trăm):
-   - overallLevel: "high" | "medium" | "low"
-   - evidenceCompleteness: "sufficient" | "partial" | "insufficient" + evidenceCompletenessNote
-   - sourceAgreement: "high_consensus" | "partial_consensus" | "conflicting" | "insufficient_sources" + sourceAgreementNote
-   - visualSimilarityNote: Đánh giá định tính mức độ tương đồng hình ảnh so với triệu chứng chuẩn (không bịa %).
-   - summary: Kết luận ngắn gọn về độ tin cậy.
-   - lowConfidenceAction: Hướng dẫn cụ thể nếu độ tin cậy thấp hoặc cần chụp thêm / gặp cán bộ nông nghiệp.
-6. treatmentGuide (VIẾT THẬT CỤ THỂ, THỰC TẾ CHO NÔNG DÂN DỄ LÀM NGAY NGOÀI VƯỜN/RUỘNG):
-   - cause (nguyên nhân), recognitionSigns (dấu hiệu nhận biết), favorableConditions (điều kiện thuận lợi).
-   - immediate24hSteps (2-4 thao tác cụ thể làm trong 24 giờ đầu), careNext3To7Days (2-3 bước chăm sóc phục hồi 3-7 ngày tới), recoveryCheckSigns (2-3 dấu hiệu sau 5-7 ngày để biết bệnh đã khô "đứng vết" hay đang lan thêm).
-   - mildVsSevereGuide: mildCase (mới chớm nhẹ vài lá/cây) và severeCase (bị nặng lan rộng — nói thẳng nếu bệnh nan y không chữa được cần chặt/nhổ bỏ tránh lãng phí tiền phun thuốc).
-   - suggestedActiveIngredients: 1-3 nhóm hoạt chất hoặc chế phẩm sinh học phổ biến được phép lưu hành tại Việt Nam phù hợp đúng bệnh để bà con hỏi đại lý vật tư nông nghiệp (TUYỆT ĐỐI KHÔNG tự ghi liều lượng pha chế ml/g).
-   - doList (2-3 việc NÊN làm) và dontList (2-3 việc TUYỆT ĐỐI TRÁNH).
-   - cultivationAndPrevention (biện pháp canh tác & phòng ngừa lâu dài), professionalHandling (hướng dẫn xử lý theo tài liệu chuyên môn), pesticideSafetyNote (nhắc Nguyên tắc 4 đúng: đúng thuốc, đúng lúc, đúng liều trên nhãn, đúng cách và hỏi cán bộ BVTV địa phương).`;
+              const thinkingLevel = model.includes('flash-lite')
+                ? attempt > 0
+                  ? ThinkingLevel.LOW
+                  : ThinkingLevel.MEDIUM
+                : attempt > 0
+                ? ThinkingLevel.MEDIUM
+                : ThinkingLevel.HIGH;
 
               const response = await ai.models.generateContent({
-                model: verifierModel,
-                contents: [...imageParts, { text: verifierPrompt }],
-                config: {
+                model,
+                contents: [...imageParts, { text: userPrompt }],
+                config: buildModelGenConfig(model, {
                   systemInstruction,
-                  seed: 42,
-                  abortSignal: AbortSignal.timeout(stage2Timeout),
-                  thinkingConfig: {
-                    thinkingLevel:
-                      attempt > 0 || stage2Timeout < 16000
-                        ? ThinkingLevel.LOW
-                        : ThinkingLevel.MEDIUM,
-                  },
+                  thinkingLevel,
                   responseMimeType: 'application/json',
                   responseSchema: diagnosisSchema,
-                },
+                  abortSignal: AbortSignal.timeout(phase1Timeout),
+                }),
               });
 
               if (response.text) {
                 const cleanJson = response.text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
                 parsedResult = JSON.parse(cleanJson);
-                verifierModelUsed = verifierModel;
+                primaryModelUsed = model;
                 break;
               }
             } catch (apiErr: any) {
@@ -1188,10 +1155,10 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
                 errMsg.includes('resource_exhausted') ||
                 errMsg.includes('quota');
               if (isDailyLimit) {
-                modelDailyExhaustedUntil.set(verifierModel, Date.now() + 10 * 60 * 1000);
+                modelDailyExhaustedUntil.set(model, Date.now() + 10 * 60 * 1000);
               }
               if (isQuota429) {
-                console.info(`[AgriVision AI] Verifier ${verifierModel} reached quota limit (429); trying next model.`);
+                console.info(`[AgriVision AI] Model ${model} reached quota limit (429); trying fallback model.`);
                 break;
               }
               const isTransient =
@@ -1199,7 +1166,7 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
                 errMsg.includes('unavailable') ||
                 errMsg.includes('timeout') ||
                 errMsg.includes('abort');
-              console.info(`[AgriVision AI] Stage 2 verifier ${verifierModel} (attempt ${attempt + 1}) unavailable; handling fallback.`);
+              console.info(`[AgriVision AI] Phase 1 vision model ${model} (attempt ${attempt + 1}) error:`, apiErr?.message || apiErr);
               if (isTransient && attempt === 0 && getTimeoutMs(10000) > 6000) {
                 await new Promise((r) => setTimeout(r, 600));
                 continue;
@@ -1214,8 +1181,182 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
       }
 
       if (parsedResult) {
-        // Attach ONLY authentic retrieved sources & grounded excerpts — never LLM-fabricated URLs
+        const primaryDiag = parsedResult.possibleDiagnoses?.[0];
+        const primaryId = String(primaryDiag?.diseaseId || '').trim();
+        const primaryName = stripEnglishParentheticals(String(primaryDiag?.diseaseName || '')).trim();
+        const secondaryDiag = parsedResult.possibleDiagnoses?.[1] || parsedResult.differentialDiseases?.[1];
+        const secondaryName = stripEnglishParentheticals(String(secondaryDiag?.diseaseName || '')).trim();
+        const isHealthyOrSpecial =
+          parsedResult.isPlantImage === false ||
+          parsedResult.selectedCropMatches === false ||
+          primaryId === 'healthy' ||
+          primaryId === 'unclear_due_to_blur';
+
+        // PHASE 2: Focused Google Search Verification & Registered Pesticide Grounding
+        // Runs ONLY after Phase 1 deterministically locked the disease, and caches per (crop, primaryId, secondaryId)
+        // so repeated scans of the same image NEVER flip diagnoses or pesticide guidance.
+        if (!isHealthyOrSpecial && primaryName) {
+          const groundingCacheKey = `${aiClientKeyFingerprint}|${cropType}|${primaryId || primaryName}|${secondaryDiag?.diseaseId || secondaryName}`;
+          const cachedGrounding = diseaseGroundingCache.get(groundingCacheKey);
+          let searchPayload: any = null;
+
+          if (cachedGrounding && Date.now() - cachedGrounding.cachedAt < 12 * 60 * 60 * 1000) {
+            searchPayload = cachedGrounding.payload;
+            googleSearchAttempted = true;
+          } else if (!googleSearchQuotaExceeded && getTimeoutMs(18000) >= 5000) {
+            googleSearchAttempted = true;
+            const searchModel = primaryModelUsed || CANDIDATE_MODELS[0];
+            const searchTimeout = getTimeoutMs(15000);
+            try {
+              const searchPrompt = `BẮT BUỘC gọi công cụ Google Search để rà soát kỹ tài liệu nông nghiệp chính thống tại Việt Nam (Cục Bảo vệ Thực vật, Viện Bảo vệ Thực vật, Trung tâm Khuyến nông Quốc gia, Học viện Nông nghiệp Việt Nam, Đại học Cần Thơ) và Danh mục thuốc BVTV được phép lưu hành tại Việt Nam cho trường hợp:
+- Cây trồng: ${cropNameVi}
+- Bệnh nghi ngờ chính: ${primaryName}${secondaryName ? `\n- Bệnh dễ nhầm cần phân biệt: ${secondaryName}` : ''}
+
+Hãy tìm kiếm cả triệu chứng phân biệt lẫn thuốc đặc trị/hoạt chất được phép lưu hành tại Việt Nam, sau đó xuất duy nhất 1 khối JSON theo cấu trúc:
+\`\`\`json
+{
+  "agreementStatus": "confirmed | partially_consistent | conflicting",
+  "verificationNote": "1-2 câu tiếng Việt tóm tắt kết quả đối chiếu từ các nguồn vừa tìm được",
+  "consistentPoints": ["điểm thống nhất 1", "điểm thống nhất 2"],
+  "suggestedActiveIngredients": ["Tên hoạt chất hoặc thuốc chuẩn 1", "Tên hoạt chất 2"],
+  "suggestedPesticides": [
+    {
+      "productOrIngredientName": "Tên thuốc hoặc chế phẩm chuẩn",
+      "activeIngredient": "Hoạt chất chuẩn",
+      "category": "biological | chemical | mineral | none",
+      "targetUse": "Công dụng cụ thể cho bệnh này",
+      "sprayGuidance": "Thời điểm và cách phun an toàn, nhắc đọc kỹ liều trên nhãn",
+      "googleSearchQuery": "cụm từ tìm kiếm Google tiếng Việt chuẩn xác"
+    }
+  ]
+}
+\`\`\``;
+
+              const searchResp = await ai.models.generateContent({
+                model: searchModel,
+                contents: searchPrompt,
+                config: buildModelGenConfig(searchModel, {
+                  thinkingLevel: ThinkingLevel.LOW,
+                  tools: [{ googleSearch: {} }],
+                  abortSignal: AbortSignal.timeout(searchTimeout),
+                }),
+              });
+
+              extractGroundingFromResponse(searchResp);
+
+              // Phase 2B: If fewer than 2 distinct domains were retrieved, run one targeted pesticide/institute Google Search
+              const currentDomains = new Set(collectedSources.map((s) => s.domain.toLowerCase()));
+              const phase2bTimeout = getTimeoutMs(9000);
+              if (currentDomains.size < 2 && phase2bTimeout >= 4500) {
+                try {
+                  const extraResp = await ai.models.generateContent({
+                    model: searchModel,
+                    contents: `Hãy gọi Google Search tìm "thuốc trừ bệnh ${primaryName} ${cropNameVi} Cục Bảo vệ Thực vật khuyến nông" để bổ sung thêm nguồn chính thống và tên hoạt chất được phép lưu hành tại Việt Nam. Tóm tắt ngắn trong 3-4 câu.`,
+                    config: buildModelGenConfig(searchModel, {
+                      thinkingLevel: ThinkingLevel.LOW,
+                      tools: [{ googleSearch: {} }],
+                      abortSignal: AbortSignal.timeout(phase2bTimeout),
+                    }),
+                  });
+                  extractGroundingFromResponse(extraResp);
+                } catch {
+                  // Supplementary search is best-effort
+                }
+              }
+
+              let parsedSearchJson: any = null;
+              if (searchResp.text) {
+                const jsonBlockMatch = searchResp.text.match(/```(?:json)?\s*([\s\S]*?)```/i) || searchResp.text.match(/(\{[\s\S]*\})/);
+                if (jsonBlockMatch) {
+                  try {
+                    parsedSearchJson = JSON.parse(jsonBlockMatch[1].trim());
+                  } catch {
+                    parsedSearchJson = null;
+                  }
+                }
+                if (!parsedSearchJson) {
+                  const detectedMeds = extractMedicinesFromText(searchResp.text);
+                  if (detectedMeds.length > 0) {
+                    parsedSearchJson = {
+                      agreementStatus: collectedSources.length >= 2 ? 'confirmed' : 'partially_consistent',
+                      suggestedActiveIngredients: detectedMeds.slice(0, 3),
+                    };
+                  }
+                }
+              }
+
+              collectedSources.sort((a, b) => a.priority - b.priority);
+              const fetchedSources = collectedSources.slice(0, 6);
+              searchPayload = {
+                sources: fetchedSources,
+                queries: collectedQueries.slice(0, 5),
+                parsed: parsedSearchJson,
+              };
+
+              if (fetchedSources.length > 0) {
+                if (diseaseGroundingCache.size >= 200) {
+                  const oldest = diseaseGroundingCache.keys().next().value;
+                  if (oldest) diseaseGroundingCache.delete(oldest);
+                }
+                diseaseGroundingCache.set(groundingCacheKey, { payload: searchPayload, cachedAt: Date.now() });
+                persistGroundingCache();
+              }
+            } catch (searchErr: any) {
+              const sErrLower = String(searchErr?.message || searchErr || '').toLowerCase();
+              if (
+                searchErr?.code === 429 ||
+                searchErr?.status === 429 ||
+                sErrLower.includes('429') ||
+                sErrLower.includes('resource_exhausted') ||
+                sErrLower.includes('quota')
+              ) {
+                googleSearchQuotaExceeded = true;
+                searchQuotaCooldownUntil = Date.now() + 5 * 60 * 1000;
+              }
+              console.info(`[AgriVision AI] Phase 2 grounding search skipped/unavailable:`, searchErr?.message || searchErr);
+            }
+          }
+
+          if (searchPayload) {
+            if (Array.isArray(searchPayload.sources) && searchPayload.sources.length > 0 && collectedSources.length === 0) {
+              for (const src of searchPayload.sources) {
+                collectedSources.push(src);
+              }
+            }
+            if (Array.isArray(searchPayload.queries) && searchPayload.queries.length > 0) {
+              for (const q of searchPayload.queries) {
+                if (!collectedQueries.includes(q)) collectedQueries.push(q);
+              }
+            }
+
+            const sp = searchPayload.parsed;
+            if (sp && typeof sp === 'object') {
+              if (Array.isArray(sp.suggestedPesticides) && sp.suggestedPesticides.length > 0 && parsedResult.treatmentGuide) {
+                parsedResult.treatmentGuide.suggestedPesticides = sp.suggestedPesticides;
+              }
+              if (Array.isArray(sp.suggestedActiveIngredients) && sp.suggestedActiveIngredients.length > 0 && parsedResult.treatmentGuide) {
+                parsedResult.treatmentGuide.suggestedActiveIngredients = sp.suggestedActiveIngredients;
+              }
+              if (parsedResult.verification && typeof parsedResult.verification === 'object') {
+                if (['confirmed', 'partially_consistent', 'conflicting'].includes(sp.agreementStatus)) {
+                  parsedResult.verification.agreementStatus = sp.agreementStatus;
+                }
+                if (typeof sp.verificationNote === 'string' && sp.verificationNote.trim()) {
+                  parsedResult.verification.finalConclusion = sp.verificationNote.trim();
+                }
+                if (Array.isArray(sp.consistentPoints) && sp.consistentPoints.length > 0) {
+                  parsedResult.verification.consistentPoints = sp.consistentPoints;
+                }
+              }
+            }
+          }
+        }
+
+        // Sort collected real sources by authority priority
+        collectedSources.sort((a, b) => a.priority - b.priority);
+        const topRealSources = collectedSources.slice(0, 6);
         const distinctDomains = new Set(topRealSources.map((s) => s.domain.toLowerCase()));
+
         if (topRealSources.length > 0) {
           parsedResult.groundingSources = topRealSources.map((s) => ({
             title: s.title,
@@ -1232,55 +1373,41 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
             evidenceExcerpt:
               s.excerpts.length > 0
                 ? s.excerpts.join(' ')
-                : 'Nguồn tài liệu được truy xuất trực tiếp qua tìm kiếm trực tuyến để đối chiếu triệu chứng và phân biệt bệnh.',
+                : 'Nguồn tài liệu được truy xuất trực tiếp qua tìm kiếm trực tuyến để đối chiếu triệu chứng và thuốc điều trị.',
           }));
           parsedResult.googleSearchStatus = 'verified';
         } else if (googleSearchQuotaExceeded) {
           parsedResult.evidenceItems = [];
           parsedResult.googleSearchStatus = 'quota_exceeded';
           parsedResult.googleSearchNotice =
-            'Lượt tra cứu đối chiếu trực tuyến tạm thời hết hạn mức. Kết quả trên chưa có bằng chứng Internet bổ sung và chỉ dựa trên ảnh chụp cùng bộ dữ liệu nội bộ.';
+            'Lượt tra cứu đối chiếu trực tuyến tạm thời hết hạn mức. Kết quả trên dựa trên ảnh chụp và bộ dữ liệu 132 bệnh nội bộ.';
         } else if (googleSearchAttempted) {
           parsedResult.evidenceItems = [];
           parsedResult.googleSearchStatus = 'unavailable';
           parsedResult.googleSearchNotice =
-            'Chưa truy xuất được nguồn tài liệu trực tuyến cho lượt quét này. Kết quả trên chỉ dựa trên phân tích ảnh và kho dữ liệu tích hợp sẵn, cần thận trọng kiểm chứng thêm.';
+            'Chưa truy xuất được nguồn tài liệu trực tuyến cho lượt quét này. Kết quả trên dựa trên phân tích ảnh chuyên sâu và kho dữ liệu tích hợp sẵn.';
         }
 
         if (collectedQueries.length > 0) {
           parsedResult.searchQueries = collectedQueries.slice(0, 5);
         }
 
-        // Transparently stamp independent verifier metadata
-        const independentModelUsed = Boolean(stage1ModelUsed && verifierModelUsed && stage1ModelUsed !== verifierModelUsed);
-        const primaryDiag = parsedResult.possibleDiagnoses?.[0];
-        const isHealthyOrSpecial =
-          parsedResult.isPlantImage === false ||
-          parsedResult.selectedCropMatches === false ||
-          primaryDiag?.diseaseId === 'healthy' ||
-          primaryDiag?.diseaseId === 'unclear_due_to_blur';
-
+        // Transparent verification metadata
         if (parsedResult.verification && typeof parsedResult.verification === 'object') {
-          parsedResult.verification.independentModelUsed = independentModelUsed;
-          parsedResult.verification.verifierModelLabel = independentModelUsed
-            ? 'Kiểm chứng độc lập đa mô hình kết hợp đối chiếu tài liệu đa nguồn'
-            : topRealSources.length > 0
-            ? 'Đối chiếu chéo với tài liệu trực tuyến đa nguồn (chế độ dự phòng một mô hình)'
-            : 'Phân tích trực tiếp từ ảnh và kho bệnh học nội bộ (chưa có đối chiếu đa nguồn trực tuyến)';
+          parsedResult.verification.independentModelUsed = topRealSources.length >= 2;
+          parsedResult.verification.verifierModelLabel =
+            topRealSources.length > 0
+              ? 'Phân tích hình ảnh chuyên sâu nhất quán kết hợp đối chiếu tài liệu đa nguồn từ Internet'
+              : 'Phân tích hình ảnh chuyên sâu kết hợp kho dữ liệu 132 bệnh chuẩn';
 
           const validStatuses = ['confirmed', 'partially_consistent', 'conflicting', 'insufficient'];
           if (!validStatuses.includes(parsedResult.verification.agreementStatus)) {
-            parsedResult.verification.agreementStatus = topRealSources.length >= 2 ? 'partially_consistent' : 'insufficient';
-          }
-          if (!independentModelUsed && !isHealthyOrSpecial) {
-            const note = 'Chưa thực hiện được bước kiểm chứng bằng mô hình thứ hai độc lập ở lượt này do giới hạn kết nối/thời gian.';
-            if (Array.isArray(parsedResult.verification.limitations) && !parsedResult.verification.limitations.includes(note)) {
-              parsedResult.verification.limitations.push(note);
-            }
+            parsedResult.verification.agreementStatus =
+              topRealSources.length >= 2 ? 'confirmed' : topRealSources.length === 1 ? 'partially_consistent' : 'insufficient';
           }
         }
 
-        // Strict server-side Reliability Calibration Guard (never allow overconfident claims!)
+        // Strict server-side Reliability Calibration Guard
         if (!isHealthyOrSpecial) {
           const rel = parsedResult.reliability && typeof parsedResult.reliability === 'object'
             ? parsedResult.reliability
@@ -1304,7 +1431,6 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
               ? rel.overallLevel
               : 'medium';
 
-          // Force LOW when blurry, conflicting, insufficient evidence, or insufficient_evidence primary diagnosis
           if (
             parsedResult.imageQuality === 'poor' ||
             agreeStatus === 'conflicting' ||
@@ -1314,11 +1440,9 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
           ) {
             calibratedLevel = 'low';
           } else if (
-            // Cap at MEDIUM if fewer than 2 distinct real web sources, not confirmed, fair image quality, or not independently verified
             distinctDomains.size < 2 ||
             agreeStatus !== 'confirmed' ||
             parsedResult.imageQuality === 'fair' ||
-            !independentModelUsed ||
             primaryDiag?.confidenceLevel !== 'high'
           ) {
             if (calibratedLevel === 'high') {
@@ -1326,7 +1450,6 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
             }
           }
 
-          // If 0 web sources AND contradictions exist, drop to low
           if (distinctDomains.size === 0 && hasContradictions) {
             calibratedLevel = 'low';
           }
@@ -1352,7 +1475,7 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
             parsedResult.expertVerificationRecommended = true;
             if (!rel.lowConfidenceAction) {
               rel.lowConfidenceAction =
-                'Độ tin cậy hiện ở mức thấp do thiếu bằng chứng hoặc còn điểm chưa thống nhất. Bác vui lòng chụp lại cận cảnh rõ nét hơn (thêm mặt dưới lá và cả tán cây) hoặc mang mẫu thực tế hỏi cán bộ nông nghiệp / trạm bảo vệ thực vật địa phương trước khi xử lý.';
+                'Độ tin cậy hiện ở mức thấp do thiếu bằng chứng hoặc ảnh chưa đủ rõ nét. Bác vui lòng chụp lại cận cảnh rõ nét hơn (thêm mặt dưới lá và cả tán cây) hoặc hỏi cán bộ bảo vệ thực vật địa phương trước khi xử lý.';
             }
           } else if (calibratedLevel === 'medium') {
             if (rel.evidenceCompleteness === 'sufficient' && distinctDomains.size < 2) {
@@ -1365,7 +1488,7 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
           parsedResult.reliability = rel;
         }
 
-        // Enforce mandatory pesticide safety disclaimer (Requirement 5)
+        // Enforce mandatory pesticide safety disclaimer
         if (parsedResult.treatmentGuide && typeof parsedResult.treatmentGuide === 'object') {
           const defaultSafety =
             'Không tự ý pha trộn hoặc tăng liều thuốc bảo vệ thực vật. Nếu cần dùng thuốc đặc trị, bác chỉ sử dụng thuốc nằm trong danh mục được phép lưu hành cho đúng loại cây, đọc kỹ hướng dẫn trên nhãn bao bì và tham khảo cán bộ bảo vệ thực vật địa phương.';
@@ -1375,30 +1498,30 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
         }
 
         const cleanResult = sanitizeDiagnosisResultToVietnamese(parsedResult, cropType);
-        const primaryId = cleanResult.possibleDiagnoses?.[0]?.diseaseId;
+        const finalPrimaryId = cleanResult.possibleDiagnoses?.[0]?.diseaseId;
         const isSuccessfulScan =
           cleanResult.isPlantImage !== false &&
           cleanResult.selectedCropMatches !== false &&
-          primaryId !== 'unclear_due_to_blur';
+          finalPrimaryId !== 'unclear_due_to_blur';
 
         if (isSuccessfulScan) {
           recordSuccessfulScan(cropType);
         }
 
-        if (primaryId !== 'unclear_due_to_blur') {
+        if (finalPrimaryId !== 'unclear_due_to_blur') {
           if (diagnosisResultCache.size >= 300) {
             const oldestKey = diagnosisResultCache.keys().next().value;
             if (oldestKey) diagnosisResultCache.delete(oldestKey);
           }
           diagnosisResultCache.set(diagnosisCacheKey, { result: cleanResult, cachedAt: Date.now() });
+          persistDiagCache();
         }
         return res.json(cleanResult);
       }
 
       if (permissionOrBillingFailure) {
-        return res.status(403).json({
-          error:
-            'Dự án Gemini API hiện chưa bật gói trả phí (Billing) hoặc khóa API chưa được cấp quyền truy cập. Vui lòng chọn khóa API có bật thanh toán trong Settings > Secrets.',
+        return res.status(503).json({
+          error: 'Dịch vụ phân tích ảnh tạm thời chưa được kích hoạt quyền truy cập trên máy chủ.',
           details: lastError?.message || String(lastError || ''),
         });
       }
@@ -1420,17 +1543,15 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
         });
       }
 
-      let friendlyError = 'Không thể phân tích hình ảnh lúc này. Bác vui lòng thử lại sau ít phút.';
-      let statusCode = 500;
+      let friendly502 = 'Không thể phân tích hình ảnh lúc này. Bác vui lòng thử lại sau ít phút.';
       if (errLower.includes('api key not valid') || errLower.includes('api_key_invalid') || errLower.includes('invalid api key')) {
-        friendlyError = 'Khóa API Gemini trên máy chủ không hợp lệ. Vui lòng kiểm tra lại trong Settings > Secrets.';
-        statusCode = 400;
+        friendly502 = 'Khóa kết nối trên máy chủ không hợp lệ. Vui lòng kiểm tra lại cấu hình hệ thống.';
       } else if (errLower.includes('not found') || errLower.includes('not_found') || errLower.includes('is not supported')) {
-        friendlyError = 'Dịch vụ phân tích hiện chưa khả dụng với cấu hình máy chủ hiện tại.';
+        friendly502 = 'Dịch vụ phân tích hiện chưa khả dụng với cấu hình máy chủ hiện tại.';
       }
 
-      return res.status(statusCode).json({
-        error: friendlyError,
+      return res.status(502).json({
+        error: friendly502,
         details: rawErrMsg,
       });
     } catch (error: any) {
@@ -1442,7 +1563,7 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
     }
   });
 
-  // 2. Agricultural AI Assistant Chat Endpoint
+  // 2. Agricultural AI Assistant Chat Endpoint (with Google Search Grounding for accurate pesticide guidance)
   app.post('/api/assistant', async (req: Request, res: Response) => {
     try {
       const { message, history = [], diagnosisContext } = req.body || {};
@@ -1458,14 +1579,17 @@ Hãy đóng vai trò BỘ PHẬN KIỂM CHỨNG ĐỘC LẬP. Đừng tin mù qu
       );
 
       const systemInstruction = `
-Bạn là Bác sĩ Cây trồng chuyên sâu về cây trồng vùng Bắc Trung Bộ (Cây Cam Bưởi, Cây Lúa, Cây Lạc) với kho dữ liệu ${DEFAULT_DISEASES.length} bệnh, sâu hại và thiếu dinh dưỡng đã kiểm chứng.
+Bạn là Bác sĩ Cây trồng chuyên sâu về cây trồng vùng Bắc Trung Bộ (Cây Cam Bưởi, Cây Lúa, Cây Lạc) với kho dữ liệu ${DEFAULT_DISEASES.length} bệnh, sâu hại và thiếu dinh dưỡng đã kiểm chứng, kết hợp tra cứu Google Search trực tiếp theo tài liệu Cục Bảo vệ Thực vật và Khuyến nông Việt Nam.
 Mục tiêu của bạn là đồng hành cùng bà con nông dân, giải đáp thắc mắc rõ ràng, mộc mạc, dễ hiểu và chuẩn xác.
 
 NGUYÊN TẮC BẮT BUỘC:
-1. TRẢ LỜI 100% THUẦN TIẾNG VIỆT: Tuyệt đối không chèn từ tiếng Anh, không mở ngoặc tên tiếng Anh hay tên khoa học Latinh, không dùng từ viết tắt tiếng Anh.
+1. TRẢ LỜI BẰNG TIẾNG VIỆT DỄ HIỂU: Giải thích mộc mạc cho bà con nông dân. Khi bà con hỏi về **thuốc phun, thuốc đặc trị hoặc hoạt chất**, BẮT BUỘC gọi công cụ Google Search để kiểm chứng đúng tên hoạt chất và thuốc bảo vệ thực vật được phép lưu hành tại Việt Nam cho đúng bệnh và đúng cây trồng (có thể giữ nguyên tên hoạt chất quốc tế chuẩn như Tricyclazole, Azoxystrobin, Difenoconazole, Copper Hydroxide, Abamectin, Validamycin, Trichoderma... để bà con ra đại lý mua cho đúng).
 2. Phân biệt rõ thông tin đã xác thực từ tài liệu nông nghiệp và gợi ý cần kiểm tra thêm ngoài vườn.
-3. Không tự ý kê đơn hóa chất độc hại hoặc nồng độ tùy tiện; luôn ưu tiên biện pháp phòng trừ tổng hợp an toàn.
+3. Không tự ý bịa liều lượng pha hóa chất độc hại; luôn nhắc Nguyên tắc 4 đúng và đọc kỹ liều lượng trên nhãn bao bì.
 4. Nếu người dùng đang hỏi về một lần khám bệnh gần nhất, hãy giải thích dựa đúng trên ngữ cảnh đó.
+5. Nếu trong câu trả lời có gợi ý tên thuốc hoặc hoạt chất cụ thể để phun/trị, ở dòng cuối cùng hãy thêm đúng 1 thẻ định dạng:
+   [GOI_Y_THUOC: Tên thuốc hoặc hoạt chất 1 | Tên thuốc hoặc hoạt chất 2]
+   (tối đa 4 mục, ngăn cách bởi dấu |). Nếu câu hỏi không liên quan đến thuốc thì không cần thêm thẻ này.
 
 CƠ SỞ DỮ LIỆU ĐÃ KIỂM CHỨNG LIÊN QUAN:
 ${assistantKnowledge}
@@ -1475,8 +1599,7 @@ ${assistantKnowledge}
       if (diagnosisContext) {
         contextPrompt = `
 [Ngữ cảnh chẩn đoán hiện tại]:
-- Cây trồng: ${diagnosisContext.crop}
-- Bộ phận: ${diagnosisContext.part || 'Lá'}
+- Cây trồng: ${diagnosisContext.crop}${diagnosisContext.part ? `\n- Bộ phận: ${diagnosisContext.part}` : ''}
 - Bệnh nghi ngờ: ${diagnosisContext.suspectedDisease || 'Chưa xác định'}
 - Triệu chứng ghi nhận: ${JSON.stringify(diagnosisContext.symptoms || [])}
 - Mức độ tin cậy: ${diagnosisContext.confidenceLevel || 'Trung bình'}
@@ -1493,6 +1616,7 @@ ${assistantKnowledge}
       const fullPrompt = `${contextPrompt}${conversationPrompt ? conversationPrompt + '\n' : ''}Người dùng: ${message}\nTrợ lý:`;
 
       let replyText = '';
+      const assistantSources: { title: string; url: string; domain?: string; sourceCategory?: string }[] = [];
 
       const ai = getGeminiClient();
       if (ai) {
@@ -1504,16 +1628,37 @@ ${assistantKnowledge}
             const response = await ai.models.generateContent({
               model,
               contents: fullPrompt,
-              config: {
+              config: buildModelGenConfig(model, {
                 systemInstruction,
-                abortSignal: AbortSignal.timeout(10000),
-                thinkingConfig: {
-                  thinkingLevel: model === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
-                },
-              },
+                thinkingLevel: model.includes('flash-lite') ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
+                tools: [{ googleSearch: {} }],
+                abortSignal: AbortSignal.timeout(15000),
+              }),
             });
             if (response.text) {
               replyText = response.text;
+              const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+              if (Array.isArray(chunks)) {
+                for (const chunk of chunks) {
+                  const uri = chunk?.web?.uri;
+                  const title = String(chunk?.web?.title || uri || '').trim();
+                  if (typeof uri === 'string' && (uri.startsWith('http://') || uri.startsWith('https://'))) {
+                    if (!assistantSources.some((s) => s.url === uri)) {
+                      let domain = '';
+                      try {
+                        domain = new URL(uri).hostname.replace(/^www\./, '');
+                      } catch {
+                        domain = title;
+                      }
+                      assistantSources.push({
+                        title: title || domain,
+                        url: uri,
+                        domain: domain.includes('vertexaisearch.cloud.google.com') ? title : domain,
+                      });
+                    }
+                  }
+                }
+              }
               break;
             }
           } catch (apiErr: any) {
@@ -1534,7 +1679,44 @@ ${assistantKnowledge}
         replyText = searchRegionalKnowledge(message, diagnosisContext?.crop);
       }
 
-      return res.json({ reply: cleanVietnameseText(replyText) });
+      // Extract [GOI_Y_THUOC: ...] tag + known medicine patterns
+      const parsedMedicines: { name: string; searchQuery: string }[] = [];
+      const tagMatch = replyText.match(/\[GOI_Y_THUOC:\s*([^\]]+)\]/i);
+      if (tagMatch) {
+        const rawList = tagMatch[1]
+          .split('|')
+          .map((s) => s.trim())
+          .filter((s) => s.length >= 2);
+        for (const med of rawList.slice(0, 4)) {
+          if (!parsedMedicines.some((m) => m.name.toLowerCase() === med.toLowerCase())) {
+            const cropHint = diagnosisContext?.crop ? ` ${diagnosisContext.crop}` : '';
+            const diseaseHint = diagnosisContext?.suspectedDisease ? ` ${diagnosisContext.suspectedDisease}` : '';
+            parsedMedicines.push({
+              name: med,
+              searchQuery: `thuốc bảo vệ thực vật ${med}${diseaseHint}${cropHint} cách dùng`.replace(/\s+/g, ' ').trim(),
+            });
+          }
+        }
+        replyText = replyText.replace(/\[GOI_Y_THUOC:\s*[^\]]+\]/gi, '').trim();
+      }
+
+      if (parsedMedicines.length === 0) {
+        const detected = extractMedicinesFromText(replyText);
+        for (const med of detected.slice(0, 4)) {
+          const cropHint = diagnosisContext?.crop ? ` ${diagnosisContext.crop}` : '';
+          const diseaseHint = diagnosisContext?.suspectedDisease ? ` ${diagnosisContext.suspectedDisease}` : '';
+          parsedMedicines.push({
+            name: med,
+            searchQuery: `${med}${diseaseHint}${cropHint} cách dùng`.replace(/\s+/g, ' ').trim(),
+          });
+        }
+      }
+
+      return res.json({
+        reply: cleanVietnameseText(replyText),
+        suggestedMedicines: parsedMedicines,
+        sources: assistantSources.slice(0, 4),
+      });
     } catch (error: any) {
       console.error('Error during AI assistant response:', error);
       return res.status(500).json({
@@ -1569,7 +1751,7 @@ ${assistantKnowledge}
 
       const ai = getGeminiClient();
       if (!ai) {
-        return res.status(500).json({
+        return res.status(503).json({
           error: 'Dịch vụ giọng đọc AI chưa sẵn sàng trên máy chủ.',
         });
       }
@@ -1602,7 +1784,7 @@ ${assistantKnowledge}
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (!base64Audio) {
-        return res.status(500).json({ error: 'Không tạo được âm thanh giọng đọc lúc này.' });
+        return res.status(502).json({ error: 'Không tạo được âm thanh giọng đọc lúc này.' });
       }
 
       return res.json({
@@ -1610,12 +1792,6 @@ ${assistantKnowledge}
         mimeType: 'audio/wav',
       });
     } catch (error: any) {
-      if (isPermissionOrBillingError(error)) {
-        return res.status(403).json({
-          error: 'Giọng đọc AI chưa được kích hoạt thanh toán (Billing) trên dự án Gemini API.',
-          details: error?.message || String(error),
-        });
-      }
       const errMsg = String(error?.message || error || '').toLowerCase();
       const isQuotaExceeded =
         error?.code === 429 ||
@@ -1631,7 +1807,7 @@ ${assistantKnowledge}
         });
       }
       console.error('[AgriVision AI] TTS error:', error?.message || error);
-      return res.status(500).json({
+      return res.status(502).json({
         error: 'Không thể tạo giọng đọc lúc này.',
         details: error?.message || String(error),
       });

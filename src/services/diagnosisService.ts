@@ -1,13 +1,16 @@
 import {
   collection,
   doc,
+  getDoc,
+  getDocFromServer,
   getDocs,
   setDoc,
   deleteDoc,
   query,
   where,
-  orderBy,
   limit,
+  runTransaction,
+  serverTimestamp,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { DiagnosisResult, DiagnosisHistoryItem, CropType, PlantPart, FieldQuizAnswers } from '../types';
@@ -15,8 +18,10 @@ import { DEFAULT_DISEASES } from '../data/defaultDiseases';
 import { sanitizeDiagnosisResultToVietnamese } from '../utils/vietnameseText';
 
 const COLLECTION_NAME = 'diagnoses';
+const APP_STATS_COLLECTION = 'app_stats';
+const GLOBAL_SCANS_DOC_ID = 'global_scans';
 const LOCAL_STORAGE_KEY = 'agrivision_local_diagnoses';
-const DIAGNOSIS_CACHE_KEY = 'agrivision_diag_cache_v9';
+const DIAGNOSIS_CACHE_KEY = 'agrivision_diag_cache_v11';
 
 export interface ScanTrustSummary {
   totalSuccessfulScans: number;
@@ -48,7 +53,8 @@ async function computeDiagnosisCacheKey(
   cropType: CropType,
   plantPart: PlantPart,
   extraImages?: ExtraAngleImageInput[],
-  quizAnswers?: FieldQuizAnswers
+  quizAnswers?: FieldQuizAnswers,
+  perceptualHash?: string
 ): Promise<string> {
   const normalizedQuiz = quizAnswers
     ? JSON.stringify({
@@ -61,7 +67,8 @@ async function computeDiagnosisCacheKey(
   const extrasKey = Array.isArray(extraImages)
     ? extraImages.map((e) => `${e.angleLabel || ''}:${e.imageBase64}`).join('|')
     : '';
-  const payload = `v9|${cropType}|${plantPart}|${normalizedQuiz}|${imageBase64}|${extrasKey}`;
+  const imageKey = perceptualHash && perceptualHash.length >= 64 ? `phash:${perceptualHash}` : imageBase64;
+  const payload = `v11|${cropType}|${plantPart}|${normalizedQuiz}|${imageKey}|${extrasKey}`;
 
   try {
     if (typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined') {
@@ -97,8 +104,8 @@ function getCachedDiagnosis(key: string): DiagnosisResult | null {
     if (!hit) return null;
     const ttlMs =
       hit.result?.googleSearchStatus === 'verified'
-        ? 12 * 60 * 60 * 1000
-        : 5 * 60 * 1000;
+        ? 24 * 60 * 60 * 1000
+        : 30 * 60 * 1000;
     if (Date.now() - hit.cachedAt > ttlMs) return null;
     return hit.result;
   } catch {
@@ -125,10 +132,10 @@ export interface ExtraAngleImageInput {
   angleLabel?: string;
 }
 
-export async function runServerDiagnosis(
+export async function runServerDiagnosisWithMeta(
   imageBase64: string,
   cropType: CropType,
-  plantPart: PlantPart,
+  plantPart: PlantPart = 'other',
   mimeType: string = 'image/jpeg',
   visualMetrics?: {
     healthyGreenRatio: number;
@@ -142,81 +149,43 @@ export async function runServerDiagnosis(
     isBlurry?: boolean;
     isTooDark?: boolean;
     isOverexposed?: boolean;
+    perceptualHash?: string;
     sourceSampleId?: string;
     filenameHint?: string;
   },
   extraImages?: ExtraAngleImageInput[],
   quizAnswers?: FieldQuizAnswers
-): Promise<DiagnosisResult> {
+): Promise<{ result: DiagnosisResult; fromCache: boolean }> {
   const cacheKey = await computeDiagnosisCacheKey(
     imageBase64,
     cropType,
     plantPart,
     extraImages,
-    quizAnswers
+    quizAnswers,
+    visualMetrics?.perceptualHash
   );
   const cachedResult = getCachedDiagnosis(cacheKey);
   if (cachedResult) {
-    return cachedResult;
+    return { result: cachedResult, fromCache: true };
   }
 
-  const requestBody = JSON.stringify({
-    imageBase64,
-    mimeType,
-    cropType,
-    plantPart,
-    visualMetrics,
-    extraImages,
-    quizAnswers,
+  const response = await fetch('/api/diagnose', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      imageBase64,
+      mimeType,
+      cropType,
+      plantPart,
+      visualMetrics,
+      extraImages,
+      quizAnswers,
+    }),
   });
 
-  let response: Response | null = null;
-  let rawText = '';
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 32000);
-    try {
-      response = await fetch('/api/diagnose', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: requestBody,
-        signal: controller.signal,
-      });
-      rawText = await response.text();
-    } catch (fetchErr: any) {
-      clearTimeout(timeoutId);
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 1000));
-        continue;
-      }
-      if (fetchErr?.name === 'AbortError') {
-        throw new Error('Máy chủ phân tích phản hồi quá lâu. Bác vui lòng thử lại với một ảnh rõ nét nhé.');
-      }
-      throw new Error('Không thể kết nối tới máy chủ phân tích. Bác vui lòng kiểm tra mạng và thử lại nhé.');
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    const contentType = response.headers.get('content-type') || '';
-    const trimmed = rawText.trim();
-    const isTransientGateway =
-      (response.status === 502 || response.status === 503) &&
-      (!trimmed || trimmed.startsWith('<') || !contentType.includes('application/json'));
-
-    if (isTransientGateway && attempt === 0) {
-      await new Promise((r) => setTimeout(r, 1200));
-      continue;
-    }
-    break;
-  }
-
-  if (!response) {
-    throw new Error('Không thể kết nối tới máy chủ phân tích. Bác vui lòng thử lại nhé.');
-  }
-
+  const rawText = await response.text();
   const contentType = response.headers.get('content-type') || '';
   const trimmed = rawText.trim();
 
@@ -230,7 +199,7 @@ export async function runServerDiagnosis(
     if (parsedErr && response.ok) {
       const res = sanitizeDiagnosisResultToVietnamese(parsedErr, cropType) as DiagnosisResult;
       setCachedDiagnosis(cacheKey, res);
-      return res;
+      return { result: res, fromCache: false };
     }
     if (parsedErr && !response.ok) {
       throw new Error(parsedErr.error || parsedErr.details || 'Lỗi khi gửi ảnh phân tích đến máy chủ.');
@@ -254,7 +223,7 @@ export async function runServerDiagnosis(
       );
     }
     throw new Error(
-      'Máy chủ phân tích đang bận hoặc kết nối tạm gián đoạn. Bác vui lòng bấm thử lại sau vài giây nhé.'
+      `Máy chủ phân tích đang bận hoặc kết nối tạm gián đoạn. Bác vui lòng bấm thử lại sau vài giây nhé.`
     );
   }
 
@@ -271,14 +240,137 @@ export async function runServerDiagnosis(
 
   const finalResult = sanitizeDiagnosisResultToVietnamese(parsed, cropType) as DiagnosisResult;
   setCachedDiagnosis(cacheKey, finalResult);
-  return finalResult;
+  return { result: finalResult, fromCache: false };
+}
+
+export async function runServerDiagnosis(
+  imageBase64: string,
+  cropType: CropType,
+  plantPart: PlantPart = 'other',
+  mimeType: string = 'image/jpeg',
+  visualMetrics?: {
+    healthyGreenRatio: number;
+    yellowRatio: number;
+    lesionRatio: number;
+    leafShape?: 'broadleaf_oval' | 'slender_blade' | 'compound_rounded_leaflets';
+    detectedCropHint?: 'citrus' | 'rice' | 'peanut' | 'unknown';
+    sharpnessScore?: number;
+    imageQuality?: 'good' | 'fair' | 'poor';
+    qualityIssues?: string[];
+    isBlurry?: boolean;
+    isTooDark?: boolean;
+    isOverexposed?: boolean;
+    perceptualHash?: string;
+    sourceSampleId?: string;
+    filenameHint?: string;
+  },
+  extraImages?: ExtraAngleImageInput[],
+  quizAnswers?: FieldQuizAnswers
+): Promise<DiagnosisResult> {
+  const { result } = await runServerDiagnosisWithMeta(
+    imageBase64,
+    cropType,
+    plantPart,
+    mimeType,
+    visualMetrics,
+    extraImages,
+    quizAnswers
+  );
+  return result;
+}
+
+export async function incrementGlobalScanStats(cropType: CropType): Promise<void> {
+  const statsPath = `${APP_STATS_COLLECTION}/${GLOBAL_SCANS_DOC_ID}`;
+  try {
+    const statsRef = doc(db, APP_STATS_COLLECTION, GLOBAL_SCANS_DOC_ID);
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(statsRef);
+      if (!snap.exists()) {
+        tx.set(statsRef, {
+          totalSuccessfulScans: 1,
+          citrus: cropType === 'citrus' ? 1 : 0,
+          rice: cropType === 'rice' ? 1 : 0,
+          peanut: cropType === 'peanut' ? 1 : 0,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const data = snap.data() || {};
+        const prevTotal =
+          typeof data.totalSuccessfulScans === 'number'
+            ? Math.max(0, Math.floor(data.totalSuccessfulScans))
+            : 0;
+        const prevCitrus = typeof data.citrus === 'number' ? Math.max(0, Math.floor(data.citrus)) : 0;
+        const prevRice = typeof data.rice === 'number' ? Math.max(0, Math.floor(data.rice)) : 0;
+        const prevPeanut = typeof data.peanut === 'number' ? Math.max(0, Math.floor(data.peanut)) : 0;
+
+        tx.update(statsRef, {
+          totalSuccessfulScans: prevTotal + 1,
+          citrus: prevCitrus + (cropType === 'citrus' ? 1 : 0),
+          rice: prevRice + (cropType === 'rice' ? 1 : 0),
+          peanut: prevPeanut + (cropType === 'peanut' ? 1 : 0),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, statsPath);
+  }
+}
+
+async function fetchGlobalScanStatsFromFirestore(): Promise<{
+  available: boolean;
+  totalSuccessfulScans: number;
+  byCrop: { citrus: number; rice: number; peanut: number };
+}> {
+  const statsPath = `${APP_STATS_COLLECTION}/${GLOBAL_SCANS_DOC_ID}`;
+  const statsRef = doc(db, APP_STATS_COLLECTION, GLOBAL_SCANS_DOC_ID);
+  try {
+    let snap;
+    try {
+      snap = await getDocFromServer(statsRef);
+    } catch (serverErr: any) {
+      const code = String(serverErr?.code || '');
+      if (code === 'permission-denied') {
+        throw serverErr;
+      }
+      snap = await getDoc(statsRef);
+    }
+    if (!snap.exists()) {
+      return {
+        available: true,
+        totalSuccessfulScans: 0,
+        byCrop: { citrus: 0, rice: 0, peanut: 0 },
+      };
+    }
+    const data = snap.data() || {};
+    const citrus = typeof data.citrus === 'number' ? Math.max(0, Math.floor(data.citrus)) : 0;
+    const rice = typeof data.rice === 'number' ? Math.max(0, Math.floor(data.rice)) : 0;
+    const peanut = typeof data.peanut === 'number' ? Math.max(0, Math.floor(data.peanut)) : 0;
+    const total =
+      typeof data.totalSuccessfulScans === 'number'
+        ? Math.max(0, Math.floor(data.totalSuccessfulScans))
+        : citrus + rice + peanut;
+    return {
+      available: true,
+      totalSuccessfulScans: Math.max(total, citrus + rice + peanut),
+      byCrop: { citrus, rice, peanut },
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, statsPath);
+    return {
+      available: false,
+      totalSuccessfulScans: 0,
+      byCrop: { citrus: 0, rice: 0, peanut: 0 },
+    };
+  }
 }
 
 export async function fetchScanTrustStats(
   userId?: string,
   isResearcher: boolean = false
 ): Promise<ScanTrustSummary> {
-  const [userHistory, serverStats] = await Promise.all([
+  const [globalStats, userHistory, serverStats] = await Promise.all([
+    fetchGlobalScanStatsFromFirestore(),
     fetchUserDiagnoses(userId, isResearcher).catch(() => [] as DiagnosisHistoryItem[]),
     fetch('/api/stats')
       .then(async (res) => (res.ok ? res.json() : null))
@@ -286,12 +378,27 @@ export async function fetchScanTrustStats(
   ]);
 
   const userSuccessful = userHistory.filter(isSuccessfulDiagnosisRecord);
+  const verifiedDiseaseCount =
+    typeof serverStats?.verifiedDiseaseCount === 'number'
+      ? serverStats.verifiedDiseaseCount
+      : DEFAULT_DISEASES.length;
+
+  // Authoritative cross-device total from Firestore app_stats/global_scans
+  if (globalStats.available) {
+    return {
+      totalSuccessfulScans: globalStats.totalSuccessfulScans,
+      userSuccessfulScans: userSuccessful.length,
+      byCrop: globalStats.byCrop,
+      verifiedDiseaseCount,
+    };
+  }
+
+  // Fallback only if Firestore global_scans is unreachable or pending rules deployment
   const userByCrop = {
     citrus: userSuccessful.filter((d) => d.cropType === 'citrus').length,
     rice: userSuccessful.filter((d) => d.cropType === 'rice').length,
     peanut: userSuccessful.filter((d) => d.cropType === 'peanut').length,
   };
-
   const serverTotal = typeof serverStats?.totalSuccessfulScans === 'number' ? serverStats.totalSuccessfulScans : 0;
   const byCrop = {
     citrus: Math.max(serverStats?.byCrop?.citrus || 0, userByCrop.citrus),
@@ -299,20 +406,11 @@ export async function fetchScanTrustStats(
     peanut: Math.max(serverStats?.byCrop?.peanut || 0, userByCrop.peanut),
   };
 
-  const totalSuccessfulScans = Math.max(
-    serverTotal,
-    userSuccessful.length,
-    byCrop.citrus + byCrop.rice + byCrop.peanut
-  );
-
   return {
-    totalSuccessfulScans,
+    totalSuccessfulScans: Math.max(serverTotal, userSuccessful.length, byCrop.citrus + byCrop.rice + byCrop.peanut),
     userSuccessfulScans: userSuccessful.length,
     byCrop,
-    verifiedDiseaseCount:
-      typeof serverStats?.verifiedDiseaseCount === 'number'
-        ? serverStats.verifiedDiseaseCount
-        : DEFAULT_DISEASES.length,
+    verifiedDiseaseCount,
   };
 }
 

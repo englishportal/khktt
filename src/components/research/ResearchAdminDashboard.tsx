@@ -557,7 +557,9 @@ export const ResearchAdminDashboard: React.FC = () => {
                     <img src={diag.imageUrl} alt="Farmer upload" className="w-full h-full object-cover" />
                     <div className="absolute top-2 left-2">
                       <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-black/60 text-white backdrop-blur-xs capitalize">
-                        {diag.cropType} • {diag.plantPart}
+                        {diag.plantPart && diag.plantPart !== 'other'
+                          ? `${diag.cropType} • ${diag.plantPart}`
+                          : diag.cropType}
                       </span>
                     </div>
                   </div>

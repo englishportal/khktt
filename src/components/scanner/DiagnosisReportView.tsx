@@ -15,6 +15,7 @@ import {
   MessageCircle,
   RefreshCw,
   Scale,
+  Search,
   ShieldAlert,
   ShieldCheck,
   Sprout,
@@ -24,6 +25,7 @@ import {
 import { CropType, DiagnosisResult, PlantPart } from '../../types';
 import { DEFAULT_DISEASES } from '../../data/defaultDiseases';
 import { cleanVietnameseText, stripEnglishParentheticals } from '../../utils/vietnameseText';
+import { buildGoogleMedicineSearchUrl, buildRawGoogleSearchUrl } from '../../utils/googleMedicineSearch';
 
 interface ExtraAnglePreview {
   imageBase64: string;
@@ -33,7 +35,7 @@ interface ExtraAnglePreview {
 interface DiagnosisReportViewProps {
   result: DiagnosisResult;
   selectedCrop: CropType;
-  selectedPart: PlantPart;
+  selectedPart?: PlantPart;
   imagePreview: string | null;
   extraImages?: ExtraAnglePreview[];
   isSaved?: boolean;
@@ -51,7 +53,7 @@ interface DiagnosisReportViewProps {
 export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
   result,
   selectedCrop,
-  selectedPart,
+  selectedPart = 'other',
   imagePreview,
   extraImages = [],
   isSaved = false,
@@ -259,6 +261,11 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
       result.treatmentGuide.suggestedActiveIngredients.length > 0
         ? result.treatmentGuide.suggestedActiveIngredients
         : [],
+    suggestedPesticides:
+      result.treatmentGuide?.suggestedPesticides &&
+      result.treatmentGuide.suggestedPesticides.length > 0
+        ? result.treatmentGuide.suggestedPesticides
+        : [],
     doList:
       result.treatmentGuide?.doList && result.treatmentGuide.doList.length > 0
         ? result.treatmentGuide.doList
@@ -340,8 +347,12 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
             )}
             <div className="text-xs text-stone-600 flex flex-wrap items-center gap-x-2 gap-y-1">
               <span>{getCropLabel(selectedCrop)}</span>
-              <span aria-hidden="true">·</span>
-              <span>{getPartLabel(selectedPart)}</span>
+              {selectedPart !== 'other' && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>{getPartLabel(selectedPart)}</span>
+                </>
+              )}
               <span aria-hidden="true">·</span>
               <span>{getImageQualityLabel(result.imageQuality)}</span>
             </div>
@@ -966,20 +977,105 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
           </div>
         )}
 
-        {/* 3. Gợi ý nhóm hoạt chất / chế phẩm sinh học để hỏi đại lý vật tư (KHÔNG tự bịa liều pha) */}
-        {treatment.suggestedActiveIngredients.length > 0 && (
-          <div className="rounded-xl border border-stone-200 bg-white p-4 sm:p-5 space-y-2.5">
-            <p className="font-bold text-stone-900 text-base flex items-center gap-2">
-              <Sprout className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span>Gợi ý nhóm hoạt chất / chế phẩm sinh học để hỏi đại lý vật tư</span>
-            </p>
-            <ul className="list-disc list-inside space-y-1.5 text-sm sm:text-base text-stone-800 leading-relaxed">
-              {treatment.suggestedActiveIngredients.map((item, idx) => (
-                <li key={idx}>{item}</li>
-              ))}
-            </ul>
-            <p className="text-xs sm:text-sm text-stone-600 pt-2 border-t border-stone-100 leading-relaxed">
-              Bác có thể đưa tên nhóm hoạt chất hoặc chế phẩm trên để hỏi đại lý vật tư nông nghiệp uy tín hoặc cán bộ khuyến nông chọn đúng sản phẩm được phép lưu hành cho {getCropLabel(selectedCrop)}. Hệ thống không tự kê liều pha — bác pha đúng liều in trên nhãn bao bì.
+        {/* 3. Thuốc phun & Hoạt chất gợi ý (đối chiếu Google & Khuyến nông) */}
+        {(treatment.suggestedPesticides.length > 0 || treatment.suggestedActiveIngredients.length > 0) && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/35 p-4 sm:p-5 space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <p className="font-bold text-stone-900 text-base flex items-center gap-2">
+                <Sprout className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span>Thuốc phun & Hoạt chất gợi ý (đối chiếu Google & Khuyến nông)</span>
+              </p>
+              <a
+                href={buildGoogleMedicineSearchUrl('', primaryDiseaseName, getCropLabel(selectedCrop))}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-emerald-800 hover:text-emerald-950 underline underline-offset-2 shrink-0"
+              >
+                <Search className="w-3.5 h-3.5 shrink-0" />
+                <span>Tìm thêm thuốc trên Google</span>
+                <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+              </a>
+            </div>
+
+            {treatment.suggestedPesticides.length > 0 ? (
+              <div className="grid grid-cols-1 gap-3">
+                {treatment.suggestedPesticides.map((item, idx) => {
+                  const searchUrl = buildRawGoogleSearchUrl(
+                    item.googleSearchQuery ||
+                      `${item.productOrIngredientName} ${item.activeIngredient} ${primaryDiseaseName} ${getCropLabel(selectedCrop)}`
+                  );
+                  return (
+                    <div
+                      key={idx}
+                      className="rounded-xl border border-stone-200 bg-white p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-bold text-stone-900 text-sm sm:text-base">
+                            {item.productOrIngredientName}
+                          </span>
+                          {item.category && (
+                            <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-900 border border-emerald-200">
+                              {item.category}
+                            </span>
+                          )}
+                        </div>
+                        {item.activeIngredient && (
+                          <p className="text-xs sm:text-sm text-stone-700">
+                            <span className="font-semibold">Hoạt chất chính:</span> {item.activeIngredient}
+                          </p>
+                        )}
+                        {item.targetUse && (
+                          <p className="text-xs sm:text-sm text-stone-700 leading-relaxed">
+                            <span className="font-semibold">Công dụng:</span> {item.targetUse}
+                          </p>
+                        )}
+                        {item.sprayGuidance && (
+                          <p className="text-xs sm:text-sm text-stone-600 leading-relaxed">
+                            <span className="font-semibold text-stone-800">Cách dùng an toàn:</span> {item.sprayGuidance}
+                          </p>
+                        )}
+                      </div>
+
+                      <a
+                        href={searchUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                      >
+                        <Search className="w-4 h-4 shrink-0" />
+                        <span>Tìm thuốc trên Google</span>
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {treatment.suggestedActiveIngredients.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="rounded-xl border border-stone-200 bg-white p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                  >
+                    <span className="text-sm sm:text-base font-medium text-stone-900">{item}</span>
+                    <a
+                      href={buildGoogleMedicineSearchUrl(item, primaryDiseaseName, getCropLabel(selectedCrop))}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      <Search className="w-3.5 h-3.5 shrink-0" />
+                      <span>Tìm thuốc trên Google</span>
+                      <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs sm:text-sm text-stone-600 pt-2 border-t border-emerald-200/70 leading-relaxed">
+              Bác bấm nút <strong>Tìm thuốc trên Google</strong> để xem nhãn thuốc, sản phẩm đang bán tại Việt Nam hoặc đưa tên hoạt chất này ra đại lý vật tư nông nghiệp uy tín hỏi mua đúng loại cho {getCropLabel(selectedCrop)}. Hệ thống không tự kê liều pha — bác pha đúng liều in trên bao bì.
             </p>
           </div>
         )}
@@ -1144,7 +1240,7 @@ export const DiagnosisReportView: React.FC<DiagnosisReportViewProps> = ({
                 onClick={() =>
                   onNavigateToAssistant({
                     crop: result.cropDetected,
-                    part: getPartLabel(selectedPart),
+                    part: selectedPart !== 'other' ? getPartLabel(selectedPart) : undefined,
                     suspectedDisease: primaryDiseaseName,
                     symptoms: result.symptoms,
                     confidenceLevel: reliabilityMeta.label,

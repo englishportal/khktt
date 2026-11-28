@@ -6,6 +6,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
     function isSignedIn() {
       return request.auth != null;
     }
@@ -16,7 +24,8 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() && (
-        request.auth.token.email in ['phamthikhanhhuyen281@gmail.com', 'cl8593834@gmail.com'] ||
+        (request.auth.token.email_verified == true &&
+         request.auth.token.email in ['phamthikhanhhuyen281@gmail.com', 'cl8593834@gmail.com']) ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
@@ -29,57 +38,114 @@ service cloud.firestore {
       );
     }
 
+    function isValidAppStatsData(data) {
+      return data.keys().hasAll(['totalSuccessfulScans', 'citrus', 'rice', 'peanut', 'updatedAt']) &&
+        data.keys().hasOnly(['totalSuccessfulScans', 'citrus', 'rice', 'peanut', 'updatedAt']) &&
+        data.totalSuccessfulScans is int &&
+        data.totalSuccessfulScans >= 0 &&
+        data.totalSuccessfulScans <= 100000000 &&
+        data.citrus is int &&
+        data.citrus >= 0 &&
+        data.citrus <= 100000000 &&
+        data.rice is int &&
+        data.rice >= 0 &&
+        data.rice <= 100000000 &&
+        data.peanut is int &&
+        data.peanut >= 0 &&
+        data.peanut <= 100000000 &&
+        data.updatedAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidAppStatsCreate(data) {
+      return isValidAppStatsData(data) &&
+        data.totalSuccessfulScans == 1 &&
+        data.citrus <= 1 &&
+        data.rice <= 1 &&
+        data.peanut <= 1 &&
+        (data.citrus + data.rice + data.peanut) == 1;
+    }
+
+    function isValidAppStatsIncrement(data, prev) {
+      return data.diff(prev).affectedKeys().hasOnly(['totalSuccessfulScans', 'citrus', 'rice', 'peanut', 'updatedAt']) &&
+        data.totalSuccessfulScans == prev.totalSuccessfulScans + 1 &&
+        data.citrus >= prev.citrus &&
+        data.citrus <= prev.citrus + 1 &&
+        data.rice >= prev.rice &&
+        data.rice <= prev.rice + 1 &&
+        data.peanut >= prev.peanut &&
+        data.peanut <= prev.peanut + 1 &&
+        (data.citrus + data.rice + data.peanut) == (prev.citrus + prev.rice + prev.peanut + 1);
+    }
+
     // User profiles
     match /users/{userId} {
-      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow get: if isValidId(userId) && isSignedIn() && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
-      allow create: if isSignedIn() && request.auth.uid == userId &&
-        request.resource.data.id == userId &&
-        request.resource.data.email is string &&
-        request.resource.data.role in ['user', 'researcher', 'administrator'];
-      allow update: if isSignedIn() && (
+      allow create: if isValidId(userId) && isSignedIn() && request.auth.uid == userId &&
+        incoming().id == userId &&
+        incoming().email is string &&
+        incoming().email.size() <= 256 &&
+        incoming().role in ['user', 'researcher', 'administrator'] &&
+        (incoming().role == 'user' || isAdmin());
+      allow update: if isValidId(userId) && isSignedIn() && (
         (request.auth.uid == userId &&
-         request.resource.data.id == userId &&
-         request.resource.data.email == resource.data.email &&
-         (isAdmin() || request.resource.data.role == resource.data.role)) ||
+         incoming().id == userId &&
+         incoming().email == existing().email &&
+         (isAdmin() || incoming().role == existing().role)) ||
         isAdmin()
       );
-      allow delete: if isAdmin();
+      allow delete: if isValidId(userId) && isAdmin();
     }
 
     // Admins list
     match /admins/{userId} {
-      allow read: if isSignedIn();
+      allow get: if isValidId(userId) && isSignedIn();
+      allow list: if isAdmin();
       allow write: if isAdmin();
     }
 
     // Disease database
     match /diseases/{diseaseId} {
-      allow read: if isSignedIn();
-      allow create, update, delete: if isAdmin();
+      allow get: if isValidId(diseaseId) && isSignedIn();
+      allow list: if isSignedIn();
+      allow create, update, delete: if isValidId(diseaseId) && isAdmin();
     }
 
     // Diagnosis records
     match /diagnoses/{diagnosisId} {
-      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin() || isResearcher());
+      allow get: if isValidId(diagnosisId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin() || isResearcher());
       allow list: if isSignedIn() && (
-        resource.data.userId == request.auth.uid ||
+        existing().userId == request.auth.uid ||
         isAdmin() ||
         isResearcher()
       );
-      allow create: if isSignedIn() &&
-        request.resource.data.userId == request.auth.uid;
-      allow update: if isSignedIn() && (
-        (resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid) ||
+      allow create: if isValidId(diagnosisId) && isSignedIn() &&
+        incoming().userId == request.auth.uid;
+      allow update: if isValidId(diagnosisId) && isSignedIn() && (
+        (existing().userId == request.auth.uid && incoming().userId == request.auth.uid) ||
         isAdmin()
       );
-      allow delete: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isValidId(diagnosisId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
     }
 
     // Research samples
     match /research_samples/{sampleId} {
-      allow read: if isResearcher();
-      allow write: if isResearcher();
+      allow get: if isValidId(sampleId) && isResearcher();
+      allow list: if isResearcher();
+      allow create, update, delete: if isValidId(sampleId) && isResearcher();
+    }
+
+    // Shared cross-device aggregate scan counters (strictly non-PII, monotonic +1 increment)
+    match /app_stats/{statId} {
+      allow get: if isValidId(statId) && statId == 'global_scans';
+      allow list: if false;
+      allow create: if isValidId(statId) && statId == 'global_scans' && isValidAppStatsCreate(incoming());
+      allow update: if isValidId(statId) && statId == 'global_scans' && isValidAppStatsData(incoming()) && (
+        isValidAppStatsIncrement(incoming(), existing()) ||
+        isAdmin()
+      );
+      allow delete: if false;
     }
   }
 }
